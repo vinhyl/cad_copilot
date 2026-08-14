@@ -8,6 +8,7 @@ Tools:
   - create_primitive   : box / cylinder
   - edit_geometry      : fillet / chamfer / scale / drill
   - boolean_parts      : fuse / cut / common of two solids
+  - pick_features      : interactive feature-picking 3D preview (offline HTML + vendor)
 
 Run:  python cad_mcp_server.py   (stdio transport, consumed by WorkBuddy mcp.json)
 """
@@ -185,6 +186,28 @@ def build123d_model(script: str, output_path: str) -> str:
         output_path: destination; format inferred from its extension
     """
     return cad_build.run_build123d_script(script, output_path)
+
+
+@mcp.tool()
+def pick_features(input_path: str, out_dir: str = "") -> str:
+    """Generate an interactive, clickable 3D feature-picking preview for a CAD file.
+
+    Unlike export_preview (a static viewer), this emits an HTML page where every
+    feature is its own separately clickable mesh: selecting a feature in the list
+    (or clicking its surface in 3D) highlights it with an x-ray overlay + orange
+    edge outline, shows its properties, and can auto-focus the camera. The page is
+    fully offline -- three.js is vendored locally under ./vendor/ next to the HTML.
+
+    Args:
+        input_path: path to source (.step/.stp/.igs/.iges/.stl/.brep)
+        out_dir: output folder for the HTML + vendored three.js; defaults to
+                 ./previews next to this server file
+    Returns: JSON with the HTML path, feature count, per-feature metadata, and
+             shape properties (volume / faces / edges / bounding-box size).
+    """
+    import feature_picker  # lazy: only loaded when this tool is actually called
+    res = feature_picker.make_picker(input_path, out_dir or None)
+    return json.dumps(res, ensure_ascii=False)
 
 
 if __name__ == "__main__":
