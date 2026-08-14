@@ -20,6 +20,14 @@ import os
 import subprocess
 import sys
 
+# 强制 stdout/stderr 使用 UTF-8，规避 Windows 控制台(cp1252)下打印中文触发
+# UnicodeEncodeError 的问题——CI 的 windows runner 默认非 UTF-8 控制台。
+try:
+    sys.stdout.reconfigure(encoding="utf-8")  # type: ignore[attr-defined]
+    sys.stderr.reconfigure(encoding="utf-8")  # type: ignore[attr-defined]
+except Exception:
+    pass
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 
