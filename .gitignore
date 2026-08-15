@@ -3,6 +3,12 @@ __pycache__/
 *.pyc
 venv/
 
+# ---- Test coverage ----
+.coverage
+.coverage.*
+.pytest_cache/
+htmlcov/
+
 # ---- Generated artifacts ----
 previews/
 *.stl
@@ -14,7 +20,7 @@ _frag_tmp.stl
 _*
 
 # ---- Other scratch (debugging helpers, not shipping) ----
-comparison.md
+/comparison.md
 diag_*.py
 make_*_compare.py
 *_compare.py

@@ -1,9 +1,6 @@
 """Generate a self-contained 3D preview HTML for a CAD file.
 
-Unlike the legacy cad_core.export_preview (which relied on three@0.160
-examples/js global scripts that no longer exist on the CDN, and on a
-sibling-STL relative fetch that fails under file:// CORS), this:
-
+This preview:
   * meshes the BREP with a size-relative deflection,
   * embeds the STL as a base64 data blob (no external file to fetch),
   * loads three.js + OrbitControls + STLLoader via an ES-module importmap
@@ -142,12 +139,17 @@ def make_preview(input_path: str, out_dir: str | None = None) -> dict:
     bb = props["bounding_box"]["size"]
     topo = props["topology"]
     html_text = (_HTML
-                 .replace("__NAME__", base)
+                 .replace("__NAME__", cad_core.html_escape_text(base))
                  .replace("__VOL__", f"{props['volume']:.4g}")
                  .replace("__FACES__", str(topo["faces"]))
                  .replace("__EDGES__", str(topo["edges"]))
                  .replace("__SIZE__", f"{bb[0]:.3g} x {bb[1]:.3g} x {bb[2]:.3g}")
                  .replace("__B64__", b64))
+    # Regeneration semantics: drop a stale preview so re-runs don't leave a
+    # stale file (and won't trip write_shape's no-overwrite guard if ever
+    # routed through it).
+    if os.path.exists(html):
+        os.remove(html)
     with open(html, "w", encoding="utf-8") as f:
         f.write(html_text)
     with open(stl, "wb") as f:

@@ -1,5 +1,11 @@
 """cad_build: build123d modeling layer for the AI Agent, on top of the OCP kernel.
 
+⚠ SECURITY: run_build123d_script executes ARBITRARY Python (a build123d script)
+with the full privileges of this process -- that is equivalent to LOCAL CODE
+EXECUTION. Only ever call it from a trusted environment. The MCP server gates
+it behind the CAD_MCP_ALLOW_BUILD123D=1 flag and runs it inside a timeout-
+guarded subprocess. Never expose it to untrusted input.
+
 Why this layer exists
 --------------------
 For an AI Agent doing CAD parsing / editing / parametric modeling, build123d's
@@ -27,6 +33,8 @@ from __future__ import annotations
 import importlib.abc
 import importlib.util
 import json
+import multiprocessing as _mp
+import os
 import sys
 
 import cad_core  # noqa: E402  (gives us _SuppressStdout + write/properties)
@@ -125,23 +133,75 @@ def to_occt_shape(obj, _depth: int = 0) -> TopoDS_Shape:
     )
 
 
+# Timeout (seconds) for a single build123d script; override via CAD_BUILD_TIMEOUT.
+_BUILD_TIMEOUT = float(os.environ.get("CAD_BUILD_TIMEOUT", "30"))
+
+
+def _run_build123d_child(src: str, output_path: str, result_q: "_mp.Queue") -> None:
+    """Execute the script in an isolated subprocess and push the outcome back.
+
+    Runs in the child process spawned by run_build123d_script. The build123d
+    namespace is rebuilt locally (the parent's import is not inherited reliably
+    across spawn), the user script is exec'd, the resulting shape is serialised
+    and written, and the outcome is sent back as ("ok", json_props) or
+    ("error", message).
+    """
+    try:
+        g = {"__name__": "__cad_build_script__"}
+        exec("from build123d import *", g)
+        exec(src, g)
+        result = g.get("result")
+        if result is None:
+            raise ValueError(
+                "build123d script must assign the final shape to `result` "
+                "(e.g. `result = part.part` or `result = p`)."
+            )
+        shape = to_occt_shape(result)
+        cad_core.write_shape(shape, output_path)
+        props = json.dumps(cad_core.properties(shape), indent=2, ensure_ascii=False)
+        result_q.put(("ok", props))
+    except Exception as exc:  # noqa: BLE001
+        result_q.put(("error", f"{type(exc).__name__}: {exc}"))
+
+
 def run_build123d_script(src: str, output_path: str) -> str:
     """Execute a build123d modeling script and write the result to output_path.
 
-    The script must assign its final geometry to a variable named ``result``
-    (a build123d Part/BuildPart, or a raw TopoDS_Shape). The full build123d API
-    (BuildPart, Box, Hole, selectors such as `faces().sort_by(Axis.Z)`, etc.) is
-    available. Returns JSON properties of the generated shape.
+    SECURITY: executing arbitrary scripts equals local code execution. The full
+    build123d API is available and the script MUST assign its final geometry to
+    a variable named ``result``. The script runs in an isolated subprocess with
+    a hard timeout (CAD_BUILD_TIMEOUT seconds, default 30); on timeout the child
+    is terminated and no output is written. The caller's signature is unchanged:
+    returns JSON properties of the generated shape, or raises RuntimeError /
+    TimeoutError on failure. Only call from a trusted environment.
+
+    Args:
+        src: build123d Python source; assign the final shape to `result`
+        output_path: destination; format inferred from its extension
     """
-    g = {"__name__": "__cad_build_script__"}
-    exec("from build123d import *", g)
-    exec(src, g)
-    result = g.get("result")
-    if result is None:
-        raise ValueError(
-            "build123d script must assign the final shape to `result` "
-            "(e.g. `result = part.part` or `result = p`)."
+    # Spawn so the child starts clean (no leaked fds / global state) and the
+    # build123d namespace is rebuilt from scratch inside the child.
+    try:
+        _mp.set_start_method("spawn", force=True)
+    except (RuntimeError, ValueError):
+        pass
+    q: "_mp.Queue" = _mp.Queue()
+    proc = _mp.Process(target=_run_build123d_child, args=(src, output_path, q))
+    proc.start()
+    proc.join(_BUILD_TIMEOUT)
+    if proc.is_alive():
+        proc.terminate()
+        proc.join()
+        raise TimeoutError(
+            f"build123d script exceeded timeout ({_BUILD_TIMEOUT}s) "
+            f"and was terminated; output not written to {output_path}"
         )
-    shape = to_occt_shape(result)
-    cad_core.write_shape(shape, output_path)
-    return json.dumps(cad_core.properties(shape), indent=2, ensure_ascii=False)
+    if q.empty():
+        raise RuntimeError(
+            "build123d subprocess produced no result (it may have crashed "
+            "without a reportable exception)."
+        )
+    status, payload = q.get()
+    if status == "ok":
+        return payload
+    raise RuntimeError(payload)

@@ -38,3 +38,17 @@ jobs:
           if [ "$RUNNER_OS" = "Windows" ]; then PY="venv/Scripts/python"; else PY="venv/bin/python"; fi
           "$PY" -c "import cad_mcp_server, json, os; d=json.loads(cad_mcp_server.pick_features('selftest.step', out_dir='previews/_ci_mcp')); assert d['feature_count']>0 and os.path.exists(d['html']), 'pick_features failed'; print('pick_features OK ->', d['html'])"
         shell: bash
+
+      - name: Install test dependencies (pytest + pytest-cov)
+        # Test deps are intentionally NOT in runtime requirements.txt; install
+        # them into the venv so the pytest.ini --cov options work on CI.
+        run: |
+          if [ "$RUNNER_OS" = "Windows" ]; then PY="venv/Scripts/python"; else PY="venv/bin/python"; fi
+          "$PY" -m pip install pytest pytest-cov
+        shell: bash
+
+      - name: Run pytest test-suite (Phase 3 regression)
+        run: |
+          if [ "$RUNNER_OS" = "Windows" ]; then PY="venv/Scripts/python"; else PY="venv/bin/python"; fi
+          "$PY" -m pytest tests/ -q
+        shell: bash

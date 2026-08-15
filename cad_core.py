@@ -15,8 +15,42 @@ a missing optional binding never breaks the whole import.
 """
 from __future__ import annotations
 
+import html
+import json
 import os
+import threading
 from OCP.TopoDS import TopoDS_Shape
+
+
+def html_escape_text(s) -> str:
+    """Escape a string for safe embedding in HTML/XML text or attributes.
+
+    Wraps html.escape(quote=True) so the result is safe inside element text and
+    double-quoted attributes alike. Every user-derived string (file names,
+    feature names, labels) MUST pass through this before HTML interpolation to
+    prevent stored XSS via a maliciously named CAD file.
+    """
+    return html.escape(str(s), quote=True)
+
+
+def json_for_script(obj) -> str:
+    """Serialize obj to JSON that is safe to embed inside a <script> block.
+
+    Beyond json.dumps(ensure_ascii=False) this neutralises the characters that
+    can break out of (or break) a <script> context:
+      - '</' -> '<\\/'  (prevents a literal </script> from closing the block)
+      - '<'  -> '\\u003c', '>' -> '\\u003e', '&' -> '\\u0026'
+      - U+2028 / U+2029 -> '\\u2028' / '\\u2029' (illegal in JS string literals)
+    NOTE: the '</' replacement MUST run BEFORE the '<' replacement.
+    """
+    s = json.dumps(obj, ensure_ascii=False)
+    s = s.replace("</", "<\\/")
+    s = s.replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
+    s = s.replace("\u2028", "\\u2028").replace("\u2029", "\\u2029")
+    return s
+
+
+_STDOUT_LOCK = threading.Lock()
 
 
 class _SuppressStdout:
@@ -31,15 +65,24 @@ class _SuppressStdout:
     """
 
     def __enter__(self):
+        # Serialise on a process-wide lock: dup2 manipulates the shared fd 1,
+        # so concurrent calls from (e.g.) parallel MCP requests would otherwise
+        # clobber each other's saved fd and corrupt the JSON-RPC stream.
+        _STDOUT_LOCK.acquire()
         self._devnull = os.open(os.devnull, os.O_WRONLY)
         self._saved = os.dup(1)
         os.dup2(self._devnull, 1)
         return self
 
     def __exit__(self, *exc):
-        os.dup2(self._saved, 1)
-        os.close(self._saved)
-        os.close(self._devnull)
+        # try/finally guarantees the lock is released even if the wrapped call
+        # (or the fd restore below) raises.
+        try:
+            os.dup2(self._saved, 1)
+            os.close(self._saved)
+            os.close(self._devnull)
+        finally:
+            _STDOUT_LOCK.release()
         return False
 
 
@@ -50,18 +93,38 @@ def read_shape(path: str) -> TopoDS_Shape:
     ext = os.path.splitext(path)[1].lower()
     if ext in (".step", ".stp"):
         from OCP.STEPControl import STEPControl_Reader
+        from OCP.IFSelect import IFSelect_ReturnStatus
+        r = STEPControl_Reader()
         with _SuppressStdout():
-            r = STEPControl_Reader()
-            r.ReadFile(path)
-            r.TransferRoots()
-        return r.OneShape()
+            status = r.ReadFile(path)
+            if status != IFSelect_ReturnStatus.IFSelect_RetDone:
+                raise ValueError(
+                    f"无法读取 CAD 文件: {path}（文件损坏或格式不支持）")
+            if r.TransferRoots() == 0 or r.NbRootsForTransfer() == 0:
+                raise ValueError(
+                    f"无法读取 CAD 文件: {path}（文件损坏或格式不支持）")
+        shape = r.OneShape()
+        if shape.IsNull():
+            raise ValueError(
+                f"无法读取 CAD 文件: {path}（文件损坏或格式不支持）")
+        return shape
     if ext in (".igs", ".iges"):
         from OCP.IGESControl import IGESControl_Reader
+        from OCP.IFSelect import IFSelect_ReturnStatus
+        r = IGESControl_Reader()
         with _SuppressStdout():
-            r = IGESControl_Reader()
-            r.ReadFile(path)
-            r.TransferRoots()
-        return r.OneShape()
+            status = r.ReadFile(path)
+            if status != IFSelect_ReturnStatus.IFSelect_RetDone:
+                raise ValueError(
+                    f"无法读取 CAD 文件: {path}（文件损坏或格式不支持）")
+            if r.TransferRoots() == 0 or r.NbRootsForTransfer() == 0:
+                raise ValueError(
+                    f"无法读取 CAD 文件: {path}（文件损坏或格式不支持）")
+        shape = r.OneShape()
+        if shape.IsNull():
+            raise ValueError(
+                f"无法读取 CAD 文件: {path}（文件损坏或格式不支持）")
+        return shape
     if ext == ".stl":
         from OCP.StlAPI import StlAPI_Reader
         s = TopoDS_Shape()
@@ -80,11 +143,24 @@ def read_shape(path: str) -> TopoDS_Shape:
                      "Supported: .step/.stp/.igs/.iges/.stl/.brep")
 
 
-def write_shape(shape: TopoDS_Shape, path: str) -> None:
-    """Write a TopoDS_Shape to the given output path (format from extension)."""
+def write_shape(shape: TopoDS_Shape, path: str, *, overwrite: bool = False) -> None:
+    """Write a TopoDS_Shape to the given output path (format from extension).
+
+    Refuses to overwrite an existing file by default: if `path` already exists
+    (and ``overwrite`` is False) this raises FileExistsError to avoid silently
+    destroying user data. Callers that intend to regenerate an output pass
+    ``overwrite=True`` (e.g. batch_convert reruns).
+    """
     ext = os.path.splitext(path)[1].lower()
     out_dir = os.path.dirname(os.path.abspath(path))
     os.makedirs(out_dir, exist_ok=True)
+    # Safety: never silently clobber an existing output (M9 / T15) unless the
+    # caller explicitly opts in with overwrite=True.
+    if os.path.exists(path):
+        if overwrite:
+            os.remove(path)
+        else:
+            raise FileExistsError(f"输出文件已存在，拒绝覆盖: {path}")
     if ext in (".step", ".stp"):
         from OCP.STEPControl import STEPControl_Writer, STEPControl_StepModelType
         with _SuppressStdout():
@@ -109,6 +185,31 @@ def write_shape(shape: TopoDS_Shape, path: str) -> None:
     else:
         raise ValueError(f"Unsupported output format: '{ext}'. "
                          "Supported: .step/.stp/.igs/.iges/.stl/.brep")
+
+
+def mesh_shape(shape, deflection):
+    """Mesh `shape` and return binary STL bytes. Uses a unique temp file
+    that is always removed afterwards. Used by the preview generators so
+    every call (including concurrent ones) is isolated."""
+    import tempfile
+    tmp = tempfile.NamedTemporaryFile(suffix=".stl", delete=False)
+    tmp_path = tmp.name
+    tmp.close()
+    try:
+        from OCP.BRepMesh import BRepMesh_IncrementalMesh
+        from OCP.StlAPI import StlAPI_Writer
+        BRepMesh_IncrementalMesh(shape, deflection)
+        w = StlAPI_Writer()
+        w.ASCIIMode = False
+        if not w.Write(shape, tmp_path):
+            raise RuntimeError("STL mesh write failed")
+        with open(tmp_path, "rb") as fh:
+            return fh.read()
+    finally:
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
 
 
 def properties(shape: TopoDS_Shape) -> dict:
@@ -186,57 +287,6 @@ def centroid_of_faces(faces):
 def _build_features_lookup(shape: TopoDS_Shape) -> dict:
     """Build id→face lookup. Currently unused placeholder."""
     return {}
-
-
-_VIEWER_HTML = """<!doctype html>
-<html lang="zh"><head><meta charset="utf-8">
-<title>CAD Preview</title>
-<style>html,body{margin:0;height:100%;background:#0e1116;color:#cdd6e4;font-family:system-ui,sans-serif;overflow:hidden}
-#info{position:fixed;left:12px;top:10px;font-size:13px;opacity:.8;z-index:2}
-#c{width:100%;height:100%}</style>
-<script src="https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/three@0.160.0/examples/js/controls/OrbitControls.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/three@0.160.0/examples/js/loaders/STLLoader.js"></script>
-</head><body>
-<div id="info">拖拽旋转 · 滚轮缩放 · 右键平移<br>模型: __STL__</div>
-<canvas id="c"></canvas>
-<script>
-const scene=new THREE.Scene();scene.background=new THREE.Color(0x0e1116);
-const cam=new THREE.PerspectiveCamera(45,innerWidth/innerHeight,0.01,1e6);
-const renderer=new THREE.WebGLRenderer({canvas:document.getElementById('c'),antialias:true});
-renderer.setSize(innerWidth,innerHeight);
-const light1=new THREE.DirectionalLight(0xffffff,1);light1.position.set(1,1,1);scene.add(light1);
-const light2=new THREE.DirectionalLight(0x88aaff,.4);light2.position.set(-1,-1,-1);scene.add(light2);
-scene.add(new THREE.AmbientLight(0xffffff,.3));
-const controls=new THREE.OrbitControls(cam,renderer.domElement);controls.enableDamping=true;
-new THREE.STLLoader().load("__STL__",(geo)=>{
-  const mesh=new THREE.Mesh(geo,new THREE.MeshStandardMaterial({color:0x6ea8fe,metalness:.3,roughness:.6}));
-  scene.add(mesh);
-  geo.computeBoundingBox();const b=geo.boundingBox;
-  const c=new THREE.Vector3();b.getCenter(c);const s=new THREE.Vector3();b.getSize(s);
-  const r=Math.max(s.x,s.y,s.z);geo.translate(-c.x,-c.y,-c.z);
-  cam.position.set(0,-r*2,r*1.2);cam.lookAt(0,0,0);controls.update();
-});
-function loop(){requestAnimationFrame(loop);controls.update();renderer.render(scene,cam);}loop();
-addEventListener('resize',()=>{cam.aspect=innerWidth/innerHeight;cam.updateProjectionMatrix();renderer.setSize(innerWidth,innerHeight);});
-</script></body></html>"""
-
-
-def export_preview(input_path: str, out_dir: str | None = None) -> dict:
-    """Export an input CAD file to a viewable STL + self-contained HTML viewer.
-
-    Returns {"stl": ..., "html": ...} with absolute paths.
-    """
-    shape = read_shape(input_path)
-    base = os.path.splitext(os.path.basename(input_path))[0]
-    out_dir = out_dir or os.path.dirname(os.path.abspath(input_path))
-    os.makedirs(out_dir, exist_ok=True)
-    stl = os.path.join(out_dir, base + ".stl")
-    html = os.path.join(out_dir, base + "_preview.html")
-    write_shape(shape, stl)
-    with open(html, "w", encoding="utf-8") as f:
-        f.write(_VIEWER_HTML.replace("__STL__", os.path.basename(stl)))
-    return {"stl": stl, "html": html}
 
 
 # ---------------------------------------------------------------------------

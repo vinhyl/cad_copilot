@@ -22,46 +22,37 @@ from __future__ import annotations
 
 import argparse
 import base64
+import hashlib
 import json
 import os
 import shutil
 import sys
-import urllib.request
+import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
-# Local three.js vendoring (offline, no CDN at view time).
-THREE_VERSION = "0.160.0"
+# Local three.js vendoring (offline, no CDN at view time). The vendored files
+# are committed to the repo and verified by SHA-256, so a compromised CDN can
+# never inject JS into the generated preview.
 VENDOR_DIR = os.path.join(HERE, "vendor")
-_VENDOR_FILES = [
-    ("build/three.module.min.js", "three.module.min.js"),
-    ("examples/jsm/controls/OrbitControls.js", "jsm/controls/OrbitControls.js"),
-    ("examples/jsm/loaders/STLLoader.js", "jsm/loaders/STLLoader.js"),
-]
+# Pinned SHA-256 of each vendored file (relative path under VENDOR_DIR). Bump
+# these only when intentionally upgrading the vendored three.js.
+_VENDOR_SHA256 = {
+    "three.module.min.js":
+        "3e690ac7d180b0aadf0891bea39eec643e29e2d3e75c99b18689518665f69ba6",
+    "jsm/controls/OrbitControls.js":
+        "5a44a9e86a2a0fb11933eed69bc2cd33c76a496854c1aed6ed776efa87d7b064",
+    "jsm/loaders/STLLoader.js":
+        "896d006a48b8f125385a485ccae154dadee801a953f0b45ceffe7ddd8a29ca93",
+}
 sys.path.insert(0, HERE)
 import cad_core  # noqa: E402
 import feature_locator as fl  # noqa: E402
 
-from OCP.BRepMesh import BRepMesh_IncrementalMesh  # noqa: E402
-from OCP.StlAPI import StlAPI_Writer  # noqa: E402
 from OCP.BRep import BRep_Builder  # noqa: E402
 from OCP.TopoDS import TopoDS_Compound  # noqa: E402
 from OCP.BRepAdaptor import BRepAdaptor_Surface  # noqa: E402
 from OCP.GeomAbs import GeomAbs_Cylinder  # noqa: E402
-
-
-def _mesh_bytes(shape, tmp_path, deflection):
-    """Mesh `shape` and return its binary STL bytes.
-
-    Reuses a single temp path (overwritten each call) to avoid the
-    sandbox safe-delete shim that blocks os.remove on Windows."""
-    BRepMesh_IncrementalMesh(shape, deflection)
-    w = StlAPI_Writer()
-    w.ASCIIMode = False
-    if not w.Write(shape, tmp_path):
-        raise RuntimeError("STL mesh write failed")
-    with open(tmp_path, "rb") as fh:
-        return fh.read()
 
 
 def _compound_of(faces):
@@ -93,12 +84,12 @@ def _group_faces_by_canonical_radius(c):
     re-deriving per-face cylinder radii (which mis-fits some faces, e.g. a
     large sleeve). Each face is assigned to the nearest canonical radius by
     its vertex-based mid-radius. Guarantees displayed ring radii == c['radii']."""
-    radii = sorted(c["radii"], reverse=True)
+    radii = sorted(c.radii, reverse=True)
     groups = {r: [] for r in radii}
-    A = c["axis"]
-    for f in c["faces"]:
-        pts = fl._vertices_of(f)
-        rad, _ = fl._radial_of(pts, A)
+    A = c.axis
+    for f in c.faces:
+        pts = fl.vertices_of(f)
+        rad, _ = fl.radial_of(pts, A)
         rmid = (min(rad) + max(rad)) / 2.0
         best = min(radii, key=lambda cr: abs(cr - rmid))
         groups[best].append(f)
@@ -107,7 +98,7 @@ def _group_faces_by_canonical_radius(c):
     return [(r, groups[r]) for r in radii if groups[r]]
 
 
-def build(shape, out_dir):
+def build(shape):
     feats_all = fl.collect_features(shape)
     comps = fl.group_features(feats_all)
     singles, patterns = fl.detect_patterns(comps)
@@ -117,68 +108,61 @@ def build(shape, out_dir):
     size = props["bounding_box"]["size"]
     maxdim = max(size) or 1.0
     deflection = max(min(maxdim / 800.0, 0.5), 1e-5)
-    tmp = os.path.join(out_dir, "_frag_tmp.stl")
 
-    body_b64 = base64.b64encode(_mesh_bytes(shape, tmp, deflection)).decode("ascii")
+    body_b64 = base64.b64encode(cad_core.mesh_shape(shape, deflection)).decode("ascii")
 
     feats = []
     for c in singles:
         # category-aware kind + colour
-        if c["axis"] is None:
+        if c.axis is None:
             kind = "surface"
-        elif c["stype"] == "torus":
+        elif c.stype == "torus":
             kind = "fillet"
         else:
-            kind = fl._classify(shape, c["loc3"], c["axis"], c["extent"])
-        if kind == "hole":
-            color = "#e63946"
-        elif kind == "boss":
-            color = "#2a7d3b"
-        elif kind == "fillet":
-            color = "#e08600"
-        else:
-            color = "#8a8f98"
-        dtype = c["stype"] if kind == "surface" else kind
-        base_fid = f"#{c['id']}" if isinstance(c["id"], int) else str(c["id"])
-        if c["composite"] and c["stype"] in ("cylinder", "cone", "sphere", "torus"):
+            kind = fl.classify(shape, c.loc3, c.axis, c.extent)
+        color = fl.feature_color(c.stype, kind)
+        label = fl.feature_label(c.stype, kind, c.composite)
+        dtype = c.stype if kind == "surface" else kind
+        base_fid = f"#{c.id}" if isinstance(c.id, int) else str(c.id)
+        if c.composite and c.stype in ("cylinder", "cone", "sphere", "torus"):
             # split composite (counterbore / stepped hole / multi-radius
             # fillet such as F7) into individual concentric rings, each
             # pickable as #{gid}.{ring}
             for k, (r, rfaces) in enumerate(_group_faces_by_canonical_radius(c), 1):
                 comp = _compound_of(rfaces)
-                b64 = base64.b64encode(_mesh_bytes(comp, tmp, deflection)).decode("ascii")
+                b64 = base64.b64encode(cad_core.mesh_shape(comp, deflection)).decode("ascii")
                 # per-sub-ring centroid so each ring has its own 3D position
                 # (parent's loc3 would give the same xyz to every ring → markers
                 # overlap). Fall back to parent loc3 if BRepGProp fails.
-                ring_loc = cad_core.centroid_of_faces(rfaces) or c["loc3"]
-                feats.append({"id": f"{base_fid}.{k}", "gid": c["id"], "ring": k,
-                              "type": dtype, "composite": True, "axis": c["axis"],
+                ring_loc = cad_core.centroid_of_faces(rfaces) or c.loc3
+                feats.append({"id": f"{base_fid}.{k}", "gid": c.id, "ring": k,
+                              "type": dtype, "composite": True, "axis": c.axis,
                               "radii": [round(r, 4)],
-                              "extent": round(c["extent"], 3),
+                              "extent": round(c.extent, 3),
                               "location": [round(x, 3) for x in ring_loc],
                               "center": [round(x, 3) for x in ring_loc],
-                              "b64": b64, "color": color})
+                              "b64": b64, "color": color, "label": label})
         else:
-            comp = _compound_of(c["faces"])
-            b64 = base64.b64encode(_mesh_bytes(comp, tmp, deflection)).decode("ascii")
-            feats.append({"id": base_fid, "gid": c["id"], "ring": 0,
-                          "type": dtype, "composite": c["composite"],
-                          "axis": c["axis"],
-                          "radii": [round(r, 4) for r in c["radii"]],
-                          "extent": round(c["extent"], 3),
-                          "location": [round(x, 3) for x in c["loc3"]],
-                          "center": [round(x, 3) for x in c["loc3"]],
-                          "b64": b64, "color": color})
+            comp = _compound_of(c.faces)
+            b64 = base64.b64encode(cad_core.mesh_shape(comp, deflection)).decode("ascii")
+            feats.append({"id": base_fid, "gid": c.id, "ring": 0,
+                          "type": dtype, "composite": c.composite,
+                          "axis": c.axis,
+                          "radii": [round(r, 4) for r in c.radii],
+                          "extent": round(c.extent, 3),
+                          "location": [round(x, 3) for x in c.loc3],
+                          "center": [round(x, 3) for x in c.loc3],
+                          "b64": b64, "color": color, "label": label})
     for p in patterns:
         comp = _compound_of(p["faces"])
-        b64 = base64.b64encode(_mesh_bytes(comp, tmp, deflection)).decode("ascii")
+        b64 = base64.b64encode(cad_core.mesh_shape(comp, deflection)).decode("ascii")
         feats.append({"id": p["id"], "gid": p["id"], "ring": 0,
                       "type": "bolt_pattern", "axis": p["axis"],
                       "radii": [round(p["radius"], 4)],
                       "extent": round(p["extent"], 3),
                       "center": [round(x, 3) for x in p["center"]],
                       "count": p["count"], "pitch": round(p["pitch"], 3),
-                      "b64": b64, "color": "#8a6d3b"})
+                      "b64": b64, "color": "#8a6d3b", "label": "螺栓孔组"})
     return body_b64, feats, props
 
 
@@ -507,15 +491,6 @@ function fmtDia(f){
   if (!f.radii || !f.radii.length) return '—';
   return f.radii.map(r=>`Ø${(2*r).toFixed(2)}`).join(' / ');
 }
-function typeName(f){
-  if (f.type==='bolt_pattern') return '螺栓孔组';
-  if (f.type==='fillet') return '圆角';
-  if (f.type==='plane') return '平面';
-  if (f.type==='freeform') return '自由曲面';
-  if (f.type==='cone') return '锥孔/锥台';
-  if (f.type==='sphere') return '球凹/球凸';
-  return f.type==='hole' ? '孔' : '凸台';
-}
 function renderPanel(mesh){
   const p = document.getElementById('panel');
   if (!mesh){ p.style.display='none'; return; }
@@ -525,7 +500,7 @@ function renderPanel(mesh){
        <div class="row"><span class="k">数量</span><span class="v">${f.count} 个</span></div>`
     : (f.composite ? `<div class="row"><span class="k">复合</span><span class="v">阶梯沉孔</span></div>` : '');
   p.innerHTML = `<h3><span class="dot" style="background:${f.color}"></span>特征 ${f.id}</h3>
-    <div class="row"><span class="k">类型</span><span class="v">${typeName(f)}</span></div>
+    <div class="row"><span class="k">类型</span><span class="v">${f.label}</span></div>
     <div class="row"><span class="k">直径</span><span class="v">${fmtDia(f)}</span></div>
     <div class="row"><span class="k">轴线</span><span class="v">${f.axis}</span></div>
     <div class="row"><span class="k">轴向长</span><span class="v">${f.extent}</span></div>
@@ -563,7 +538,7 @@ const listEl = document.getElementById('list');
 FEATS.forEach(f=>{
   const d=document.createElement('div');
   d.dataset.fid=String(f.id);
-  d.innerHTML=`<span class="dot" style="background:${f.color}"></span>${f.id} ${typeName(f)} ${fmtDia(f)}`;
+  d.innerHTML=`<span class="dot" style="background:${f.color}"></span>${f.id} ${f.label} ${fmtDia(f)}`;
   d.onmouseenter=()=>{ const m=meshByFid(String(f.id)); if(m&&m!==selected) setLevel(m,1); hovered=m; };
   d.onmouseleave=()=>{ const m=meshByFid(String(f.id)); if(m&&m!==selected) setLevel(m,0); if(hovered===m)hovered=null; };
   d.onclick=()=>{
@@ -591,26 +566,44 @@ addEventListener('resize', ()=>{ cam.aspect=innerWidth/innerHeight; cam.updatePr
 </script></body></html>"""
 
 
+def _vendor_sha256(path: str) -> str:
+    """Return the SHA-256 hex digest of a file, read in chunks."""
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 16), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
 def _ensure_vendor():
-    """Ensure the local three.js copy exists; download once if missing.
+    """Verify the locally vendored three.js copy is present and unmodified.
 
     The generated HTML references ./vendor/ relatively, so three.js is fully
-    offline at view time. If the vendored files are absent (fresh checkout or a
-    package that didn't ship them), fetch them once from the CDN and cache under
-    VENDOR_DIR. Subsequent runs and packaged copies skip the download.
+    offline at view time. The vendored files are committed to the repo and are
+    NOT downloaded from any CDN at runtime -- a compromised CDN would otherwise
+    let an attacker inject arbitrary JS into the preview. If a file is missing
+    or its SHA-256 does not match the pinned value, refuse to run.
     """
-    if os.path.exists(os.path.join(VENDOR_DIR, "three.module.min.js")):
-        return
-    print(f"[feature_picker] 本地 three.js 缺失，正在从 CDN 下载 r{THREE_VERSION} …",
-          file=sys.stderr)
-    os.makedirs(VENDOR_DIR, exist_ok=True)
-    for src, dst in _VENDOR_FILES:
-        url = f"https://cdn.jsdelivr.net/npm/three@{THREE_VERSION}/{src}"
-        out = os.path.join(VENDOR_DIR, dst)
-        os.makedirs(os.path.dirname(out), exist_ok=True)
-        with urllib.request.urlopen(url, timeout=60) as r, open(out, "wb") as f:
-            f.write(r.read())
-    print("[feature_picker] three.js 已本地化到 vendor/。", file=sys.stderr)
+    missing, tampered = [], []
+    for name, expected in _VENDOR_SHA256.items():
+        p = os.path.join(VENDOR_DIR, name)
+        if not os.path.isfile(p):
+            missing.append(name)
+            continue
+        if _vendor_sha256(p) != expected:
+            tampered.append(name)
+    if missing or tampered:
+        problems = []
+        if missing:
+            problems.append("missing: " + ", ".join(missing))
+        if tampered:
+            problems.append("tampered: " + ", ".join(tampered))
+        raise RuntimeError(
+            "vendor three.js verification failed (" + "; ".join(problems) +
+            "). The offline preview requires the pinned vendored files under "
+            + VENDOR_DIR + ". Re-sync vendor/ from a trusted source; do not "
+            "download from a CDN at runtime."
+        )
 
 
 def make_picker(input_path, out_dir=None):
@@ -624,17 +617,22 @@ def make_picker(input_path, out_dir=None):
     if os.path.exists(out_vendor):
         shutil.rmtree(out_vendor)
     shutil.copytree(VENDOR_DIR, out_vendor)
-    body_b64, feats, props = build(shape, out_dir)
+    body_b64, feats, props = build(shape)
 
     bb = props["bounding_box"]["size"]
     topo = props["topology"]
     html_text = (_HTML
-                 .replace("__NAME__", base)
+                 .replace("__NAME__", cad_core.html_escape_text(base))
                  .replace("__BODY__", body_b64)
-                 .replace("__FEATS__", json.dumps(feats, ensure_ascii=False)))
+                 .replace("__FEATS__", cad_core.json_for_script(feats)))
     # also drop the leftover placeholder if name appears twice
-    html_text = html_text.replace("__NAME__", base)
+    html_text = html_text.replace("__NAME__", cad_core.html_escape_text(base))
     html_path = os.path.join(out_dir, base + "_拾取.html")
+    # Regeneration semantics: remove a stale preview so re-runs never trip on
+    # the existing file (and stay consistent with write_shape's no-overwrite
+    # guard if the HTML path is ever routed through it).
+    if os.path.exists(html_path):
+        os.remove(html_path)
     with open(html_path, "w", encoding="utf-8") as fh:
         fh.write(html_text)
     return {"html": html_path, "feature_count": len(feats),

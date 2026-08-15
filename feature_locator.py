@@ -42,12 +42,76 @@ from OCP.BRep import BRep_Tool  # noqa: E402
 from OCP.gp import gp_Dir, gp_Pnt, gp_Ax2  # noqa: E402
 from OCP.HLRBRep import HLRBRep_Algo, HLRBRep_HLRToShape  # noqa: E402
 from OCP.BRepClass3d import BRepClass3d_SolidClassifier  # noqa: E402
+from dataclasses import dataclass  # noqa: E402
+from typing import Any  # noqa: E402
+
+
+# --------------------------------------------------------------------------
+# explicit feature model
+# --------------------------------------------------------------------------
+@dataclass
+class Feature:
+    """A grouped CAD feature (an analytic revolved face group, a plane region,
+    or a freeform region) produced by ``group_features``.
+
+    Mirrors the dict previously returned by group_features; the render path and
+    feature_picker now read typed attributes instead of a fragile ``[...]``
+    dict contract (H7)."""
+    stype: str
+    axis: str | None
+    loc: tuple
+    radii: list
+    radius: float
+    extent: float
+    loc3: tuple
+    composite: bool
+    faces: list
+    id: Any = None
+    kind: str | None = None
+    normal: Any = None
+    offset: float | None = None
+
+
+FEATURE_TYPE_REGISTRY = {
+    "cylinder": {"color_hole": "#e63946", "color_boss": "#2a7d3b", "color_default": "#8a8f98",
+                 "label_hole": "孔", "label_boss": "凸台"},
+    "cone":     {"color_hole": "#e63946", "color_boss": "#2a7d3b", "color_default": "#8a8f98",
+                 "label_hole": "锥孔", "label_boss": "锥台"},
+    "torus":    {"color": "#e08600", "kind": "fillet", "label": "圆角"},
+    "sphere":   {"color_hole": "#e63946", "color_boss": "#2a7d3b", "color_default": "#8a8f98",
+                 "label_hole": "球凹", "label_boss": "球凸"},
+    "plane":    {"color": "#8a8f98", "kind": "surface", "label": "平面"},
+    "freeform": {"color": "#8a8f98", "kind": "surface", "label": "自由曲面"},
+    "bolt_pattern": {"color": "#8a6d3b", "label": "螺栓孔组"},
+}
+
+
+def feature_color(stype, kind=None):
+    r = FEATURE_TYPE_REGISTRY.get(stype, {})
+    if "color" in r:
+        return r["color"]
+    if kind == "hole":
+        return r.get("color_hole", "#8a8f98")
+    if kind == "boss":
+        return r.get("color_boss", "#8a8f98")
+    return r.get("color_default", "#8a8f98")
+
+
+def feature_label(stype, kind=None, composite=False):
+    r = FEATURE_TYPE_REGISTRY.get(stype, {})
+    if "label" in r:
+        base = r["label"]
+    else:
+        base = r.get("label_hole" if kind == "hole" else "label_boss", "特征")
+    if composite:
+        base = "复合沉孔" if kind == "hole" else "复合凸台"
+    return base
 
 
 # --------------------------------------------------------------------------
 # geometry helpers
 # --------------------------------------------------------------------------
-def _vertices_of(shape):
+def vertices_of(shape):
     pts = []
     exp = TopExp_Explorer(shape, TopAbs_VERTEX)
     while exp.More():
@@ -58,10 +122,14 @@ def _vertices_of(shape):
     return pts
 
 
-def _part_bbox(shape):
+def part_bbox(shape):
     xs, ys, zs = [], [], []
-    for x, y, z in _vertices_of(shape):
+    for x, y, z in vertices_of(shape):
         xs.append(x); ys.append(y); zs.append(z)
+    if not xs:
+        # Degenerate / empty model (no vertices): callers must guard this and
+        # produce a sparse but valid result instead of crashing on min([]).
+        return None
     return (min(xs), min(ys), min(zs), max(xs), max(ys), max(zs))
 
 
@@ -74,7 +142,7 @@ def _canon_axis(d):
     return "Z"
 
 
-def _classify(shape, loc3, axis, extent):
+def classify(shape, loc3, axis, extent):
     """Return 'hole' if the cylinder axis-center midpoint lies OUTSIDE the
     solid (i.e. it is a cavity), 'boss' if INSIDE the material."""
     mid = [loc3[0], loc3[1], loc3[2]]
@@ -101,7 +169,7 @@ def collect_features(shape):
         f = TopoDS.Face_s(exp.Current())
         ad = BRepAdaptor_Surface(f)
         gtype = ad.GetType()
-        pts = _vertices_of(f)
+        pts = vertices_of(f)
         if not pts:
             exp.Next()
             continue
@@ -113,7 +181,7 @@ def collect_features(shape):
             elif gtype == GeomAbs_Torus:
                 ax = ad.Torus().Axis(); stype = "torus"
             else:
-                ax = ad.Sphere().Axis(); stype = "sphere"
+                ax = ad.Sphere().Position().Axis(); stype = "sphere"
             d = ax.Direction()
             axis = _canon_axis(d)
             if axis == "X":
@@ -165,7 +233,7 @@ def group_features(feats, loc_tol=0.5, plane_tol=0.5):
         feature -- coaxial holes / bosses / fillets collapse here.
       * planes sharing normal + offset (coplanar) merge into one flat region.
       * freeform faces stay individual (no parameterisation possible).
-    Returns a flat list of feature dicts (each carries its `faces`)."""
+    Returns a flat list of Feature objects (each carries its `faces`)."""
     buckets = {}
     for c in feats:
         if c["axis"] is not None:
@@ -190,24 +258,28 @@ def group_features(feats, loc_tol=0.5, plane_tol=0.5):
                            reverse=True)
             extent = max(i["extent"] for i in items)
             composite = (st in ("cylinder", "cone", "torus", "sphere") and len(radii) > 1)
-            comps.append({"stype": st, "axis": axis, "loc": loc, "radii": radii,
-                          "radius": radii[0] if radii else 0.0, "extent": extent,
-                          "loc3": loc3, "composite": composite,
-                          "faces": [i["face"] for i in items]})
+            comps.append(Feature(
+                stype=st, axis=axis, loc=loc, radii=radii,
+                radius=radii[0] if radii else 0.0, extent=extent,
+                loc3=loc3, composite=composite,
+                faces=[i["face"] for i in items]))
         elif st == "plane":
-            comps.append({"stype": "plane", "axis": None, "loc": items[0]["loc"],
-                          "radii": [], "radius": 0.0, "extent": 0.0,
-                          "loc3": items[0]["loc3"], "normal": items[0]["normal"],
-                          "composite": False, "faces": [i["face"] for i in items]})
+            comps.append(Feature(
+                stype="plane", axis=None, loc=items[0]["loc"],
+                radii=[], radius=0.0, extent=0.0,
+                loc3=items[0]["loc3"], composite=False,
+                faces=[i["face"] for i in items],
+                normal=items[0]["normal"], offset=items[0]["offset"]))
         else:
-            comps.append({"stype": "freeform", "axis": None, "loc": items[0]["loc"],
-                          "radii": [], "radius": 0.0, "extent": 0.0,
-                          "loc3": items[0]["loc3"], "composite": False,
-                          "faces": [items[0]["face"]]})
+            comps.append(Feature(
+                stype="freeform", axis=None, loc=items[0]["loc"],
+                radii=[], radius=0.0, extent=0.0,
+                loc3=items[0]["loc3"], composite=False,
+                faces=[items[0]["face"]]))
     _cat = {"cylinder": 0, "cone": 1, "torus": 2, "sphere": 3,
             "plane": 4, "freeform": 5}
-    comps.sort(key=lambda c: (_cat.get(c["stype"], 9), -c["radius"],
-                               c["loc"][0], c["loc"][1]))
+    comps.sort(key=lambda c: (_cat.get(c.stype, 9), -c.radius,
+                               c.loc[0], c.loc[1]))
     return comps
 
 
@@ -218,21 +290,21 @@ def assign_ids(singles, patterns):
       * analytic revolved features (holes/bosses/cones/fillets/spheres) -> #1, #2, ...
       * planar regions   -> L1, L2, ...
       * freeform regions -> S1, S2, ...
-    Mutates the dicts in place."""
+    Mutates the Feature objects / pattern dicts in place."""
     for i, p in enumerate(patterns, 1):
         p["id"] = f"P{i}"
-    an = [c for c in singles if c["axis"] is not None and c["stype"] != "torus"]
-    to = [c for c in singles if c["stype"] == "torus"]
-    pl = [c for c in singles if c["stype"] == "plane"]
-    fr = [c for c in singles if c["stype"] == "freeform"]
+    an = [c for c in singles if c.axis is not None and c.stype != "torus"]
+    to = [c for c in singles if c.stype == "torus"]
+    pl = [c for c in singles if c.stype == "plane"]
+    fr = [c for c in singles if c.stype == "freeform"]
     for j, c in enumerate(an, 1):
-        c["id"] = j
+        c.id = j
     for j, c in enumerate(to, 1):
-        c["id"] = f"F{j}"
+        c.id = f"F{j}"
     for j, c in enumerate(pl, 1):
-        c["id"] = f"L{j}"
+        c.id = f"L{j}"
     for j, c in enumerate(fr, 1):
-        c["id"] = f"S{j}"
+        c.id = f"S{j}"
 
 
 def detect_patterns(comps, same_r=0.05, same_ext=0.3, ring_tol=0.12, min_n=3):
@@ -242,31 +314,31 @@ def detect_patterns(comps, same_r=0.05, same_ext=0.3, ring_tol=0.12, min_n=3):
     buckets = {}
     singles, patterns = [], []
     for c in comps:
-        if c["axis"] is None:
+        if c.axis is None:
             singles.append(c)
             continue
-        r = c["radii"][0]
-        key = (c["axis"], round(r / same_r), round(c["extent"] / same_ext))
+        r = c.radii[0]
+        key = (c.axis, round(r / same_r), round(c.extent / same_ext))
         buckets.setdefault(key, []).append(c)
     for key, items in buckets.items():
         if len(items) < min_n:
             singles.extend(items)
             continue
-        cx = sum(i["loc"][0] for i in items) / len(items)
-        cy = sum(i["loc"][1] for i in items) / len(items)
-        dists = [math.hypot(i["loc"][0] - cx, i["loc"][1] - cy) for i in items]
+        cx = sum(i.loc[0] for i in items) / len(items)
+        cy = sum(i.loc[1] for i in items) / len(items)
+        dists = [math.hypot(i.loc[0] - cx, i.loc[1] - cy) for i in items]
         mean_d = sum(dists) / len(dists)
         if mean_d < 1e-6:
             singles.extend(items)
             continue
         std = math.sqrt(sum((d - mean_d) ** 2 for d in dists) / len(dists))
         if std / mean_d < ring_tol:
-            patterns.append({"axis": items[0]["axis"], "center": (cx, cy),
-                             "pitch": mean_d, "radius": items[0]["radii"][0],
+            patterns.append({"axis": items[0].axis, "center": (cx, cy),
+                             "pitch": mean_d, "radius": items[0].radii[0],
                              "count": len(items),
-                             "holes": [(i["loc"][0], i["loc"][1]) for i in items],
-                             "extent": items[0]["extent"],
-                             "faces": [f for i in items for f in i["faces"]]})
+                             "holes": [(i.loc[0], i.loc[1]) for i in items],
+                             "extent": items[0].extent,
+                             "faces": [f for i in items for f in i.faces]})
         else:
             singles.extend(items)
     return singles, patterns
@@ -274,7 +346,12 @@ def detect_patterns(comps, same_r=0.05, same_ext=0.3, ring_tol=0.12, min_n=3):
 
 def choose_axis(feats):
     from collections import Counter
-    cnt = Counter(f["axis"] for f in feats if f.get("axis") is not None)
+
+    def _ax(f):
+        # singles are Feature objects; patterns are still plain dicts.
+        return f.axis if isinstance(f, Feature) else f.get("axis")
+
+    cnt = Counter(_ax(f) for f in feats if _ax(f) is not None)
     if not cnt:
         return "X"
     best = max(cnt.items(), key=lambda kv: (kv[1], {"X": 3, "Y": 2, "Z": 1}[kv[0]]))
@@ -284,7 +361,7 @@ def choose_axis(feats):
 # --------------------------------------------------------------------------
 # thread (freeform -> helical) recognition
 # --------------------------------------------------------------------------
-def _radial_of(pts, A):
+def radial_of(pts, A):
     """Return (radii, axial_coords) for points relative to axis A."""
     if A == "X":
         return [math.hypot(p[1], p[2]) for p in pts], [p[0] for p in pts]
@@ -300,7 +377,7 @@ def _fit_axis_for_freeform(pts):
     axis is the one minimising the orthogonal-radius range."""
     best = None
     for A in ("X", "Y", "Z"):
-        rad, axc = _radial_of(pts, A)
+        rad, axc = radial_of(pts, A)
         tooth = max(rad) - min(rad)
         if best is None or tooth < best[1]:
             best = (A, tooth, (min(axc), max(axc)))
@@ -309,7 +386,7 @@ def _fit_axis_for_freeform(pts):
 
 def _fit_pitch(pts, A):
     """Best-effort lead/pitch from the periodic radius variation."""
-    rad, axc = _radial_of(pts, A)
+    rad, axc = radial_of(pts, A)
     try:
         import numpy as np
         ts = np.asarray(axc, float)
@@ -341,7 +418,7 @@ def _fit_handedness(pts, A):
         ang = [math.atan2(p[2], p[1]) for p in pts]
     else:
         ang = [math.atan2(p[1], p[0]) for p in pts]
-    _, axc = _radial_of(pts, A)
+    _, axc = radial_of(pts, A)
     order = sorted(range(len(axc)), key=lambda i: axc[i])
     prev_t, prev_a, acc, n = None, None, 0.0, 0
     for i in order:
@@ -416,8 +493,21 @@ def _find_host_cyl(cyls, A, major, root, amin, amax, rad_tol=3.0, ax_tol=8.0):
     return best
 
 
+# identify_threads() is WIP / NOT yet integrated into main() or
+# feature_picker.build() -- it is dead code until the thread-recognition
+# render path is wired up. Leave it untouched from the render path; the
+# internal dict access below assumes the pre-Feature raw feature dicts and
+# is only meaningful once threads are actually integrated. Do NOT attempt
+# the T13 O(n^2) radial-binning optimisation here: that is wasted effort on
+# code that is not on any live path (and would risk golden-test behaviour).
 def identify_threads(singles, cyls, axial_gap=2.0, pos_tol=3.0, rad_tol=2.0):
     """Cluster freeform faces into helical (thread) features.
+
+    WIP / NOT YET INTEGRATED into main() or feature_picker.build() -- see the
+    module-level note above. Known characteristic: the clustering is O(n^2)
+    in the number of freeform faces (the pairwise radius/axial overlap loops
+    below). That is acceptable for a future thread pass but is intentionally
+    left un-optimised while the function is dead code.
 
     Returns (threads, host_map) where each thread is a dict with axis,
     major/min radius, length, pitch/handedness (best-effort) and the list
@@ -426,12 +516,12 @@ def identify_threads(singles, cyls, axial_gap=2.0, pos_tol=3.0, rad_tol=2.0):
     ff = [c for c in singles if c["stype"] == "freeform"]
     items = []
     for c in ff:
-        pts = _vertices_of(c["faces"][0])
+        pts = vertices_of(c["faces"][0])
         if len(pts) < 4:
             continue
         fit = _fit_axis_for_freeform(pts)
         A, _, (amin, amax) = fit
-        rad, _ = _radial_of(pts, A)
+        rad, _ = radial_of(pts, A)
         pcx = sum(p[0] for p in pts) / len(pts)
         pcy = sum(p[1] for p in pts) / len(pts)
         pcz = sum(p[2] for p in pts) / len(pts)
@@ -507,7 +597,7 @@ def identify_threads(singles, cyls, axial_gap=2.0, pos_tol=3.0, rad_tol=2.0):
     for cl in clusters:
         allpts = [p for it in cl for p in it["pts"]]
         A = cl[0]["axis"]
-        rad, _ = _radial_of(allpts, A)
+        rad, _ = radial_of(allpts, A)
         major, root = max(rad), min(rad)
         amin = min(it["amin"] for it in cl)
         amax = max(it["amax"] for it in cl)
@@ -526,6 +616,8 @@ def identify_threads(singles, cyls, axial_gap=2.0, pos_tol=3.0, rad_tol=2.0):
             # mark the source freeform faces as consumed so they are no
             # longer listed as raw freeform features -- the thread now
             # represents them (attached to a host cylinder or as TH#).
+            # NOTE: `_consumed` is only meaningful once threads are wired
+            # into the render path; it is currently dead code.
             for it in cl:
                 it["c"]["_consumed"] = True
     # assign TH# ids to standalone threads
@@ -616,22 +708,27 @@ def place_labels(anchors, W, H, badge_r=14, box_w=30, box_h=22, off=14):
 # HTML
 # --------------------------------------------------------------------------
 def build_html(shape, singles, patterns, axis, silhouette, bbox, src_name):
-    if axis == "X":
-        u_min, u_max = bbox[1], bbox[4]
-        v_min, v_max = bbox[2], bbox[5]
-        u_lab, v_lab = "Y", "Z"
-    elif axis == "Y":
-        u_min, u_max = bbox[0], bbox[3]
-        v_min, v_max = bbox[2], bbox[5]
-        u_lab, v_lab = "X", "Z"
+    # A None bbox (empty / degenerate model) is guarded here: fall back to a
+    # safe default viewBox and skip the (already-None) silhouette projection.
+    if bbox is not None:
+        if axis == "X":
+            u_min, u_max = bbox[1], bbox[4]
+            v_min, v_max = bbox[2], bbox[5]
+            u_lab, v_lab = "Y", "Z"
+        elif axis == "Y":
+            u_min, u_max = bbox[0], bbox[3]
+            v_min, v_max = bbox[2], bbox[5]
+            u_lab, v_lab = "X", "Z"
+        else:
+            u_min, u_max = bbox[0], bbox[3]
+            v_min, v_max = bbox[1], bbox[4]
+            u_lab, v_lab = "X", "Y"
+        margin = 0.14 * max(u_max - u_min, v_max - v_min, 1e-6)
+        u0, u1 = u_min - margin, u_max + margin
+        v0, v1 = v_min - margin, v_max + margin
     else:
-        u_min, u_max = bbox[0], bbox[3]
-        v_min, v_max = bbox[1], bbox[4]
+        u0, u1, v0, v1 = -1.0, 1.0, -1.0, 1.0
         u_lab, v_lab = "X", "Y"
-
-    margin = 0.14 * max(u_max - u_min, v_max - v_min, 1e-6)
-    u0, u1 = u_min - margin, u_max + margin
-    v0, v1 = v_min - margin, v_max + margin
     span_u, span_v = u1 - u0, v1 - v0
     W, H = 900, 660
     scale = min(W / span_u, H / span_v)
@@ -644,12 +741,12 @@ def build_html(shape, singles, patterns, axis, silhouette, bbox, src_name):
 
     # classify single features
     for c in singles:
-        if c["axis"] is None:
-            c["kind"] = "surface"
-        elif c["stype"] == "torus":
-            c["kind"] = "fillet"
+        if c.axis is None:
+            c.kind = "surface"
+        elif c.stype == "torus":
+            c.kind = "fillet"
         else:
-            c["kind"] = _classify(shape, c["loc3"], c["axis"], c["extent"])
+            c.kind = classify(shape, c.loc3, c.axis, c.extent)
 
     svg = []
     svg.append(f'<svg id="loc" viewBox="0 0 {W} {H}" width="100%" '
@@ -692,42 +789,37 @@ def build_html(shape, singles, patterns, axis, silhouette, bbox, src_name):
     for c in singles:
         # project the feature centroid into the end-view plane
         if axis == "X":
-            u, v = c["loc3"][1], c["loc3"][2]
+            u, v = c.loc3[1], c.loc3[2]
         elif axis == "Y":
-            u, v = c["loc3"][0], c["loc3"][2]
+            u, v = c.loc3[0], c.loc3[2]
         else:
-            u, v = c["loc3"][0], c["loc3"][1]
+            u, v = c.loc3[0], c.loc3[1]
         cx, cy = tx(u), ty(v)
-        st = c["stype"]
-        if st in ("cylinder", "cone", "sphere"):
-            stroke = "#e63946" if c["kind"] == "hole" else "#2a7d3b"
-        elif st == "torus":
-            stroke = "#e08600"            # fillet / round
-        else:
-            stroke = "#8a8f98"            # plane / freeform
-        end_on = (c["axis"] == axis)
+        st = c.stype
+        stroke = feature_color(c.stype, c.kind)
+        end_on = (c.axis == axis)
         analytic = st in ("cylinder", "cone", "torus", "sphere")
-        if analytic and c["radii"]:
-            for r in c["radii"]:
+        if analytic and c.radii:
+            for r in c.radii:
                 rr = r * scale
-                svg.append(f'<circle class="feat" data-id="{c["id"]}" cx="{cx:.1f}" '
+                svg.append(f'<circle class="feat" data-id="{c.id}" cx="{cx:.1f}" '
                            f'cy="{cy:.1f}" r="{rr:.1f}" fill="{stroke}14" '
                            f'stroke="{stroke}" stroke-width="2"/>')
             if not end_on:
-                svg.append(f'<circle class="feat" data-id="{c["id"]}" cx="{cx:.1f}" '
+                svg.append(f'<circle class="feat" data-id="{c.id}" cx="{cx:.1f}" '
                            f'cy="{cy:.1f}" r="9" fill="none" stroke="{stroke}" '
                            f'stroke-width="1" stroke-dasharray="3 3"/>')
         else:
             # plane / freeform: square marker (no clean circular projection)
-            svg.append(f'<rect class="feat" data-id="{c["id"]}" x="{cx-5:.1f}" '
+            svg.append(f'<rect class="feat" data-id="{c.id}" x="{cx-5:.1f}" '
                        f'y="{cy-5:.1f}" width="10" height="10" fill="{stroke}55" '
                        f'stroke="{stroke}" stroke-width="1.5"/>')
-        color_map[c["id"]] = stroke
+        color_map[c.id] = stroke
         # only the primary holes/bosses get numbered badges + leader lines;
         # fillets/planes/freeform/threads stay as hoverable markers
         # (+ full table), otherwise 60+ badges would crowd the end-view.
-        if c["stype"] == "cylinder":
-            single_anchors.append((cx, cy, c["id"]))
+        if c.stype == "cylinder":
+            single_anchors.append((cx, cy, c.id))
 
     # ---- labels with leader lines ----
     labels = place_labels(pat_anchors + single_anchors, W, H)
@@ -761,27 +853,14 @@ def build_html(shape, singles, patterns, axis, silhouette, bbox, src_name):
 
     # ---- table ----
     def typestr(c):
-        if c["stype"] == "torus":
-            return "圆角"
-        if c["stype"] == "plane":
-            return "平面"
-        if c["stype"] == "freeform":
-            return "自由曲面"
-        if c["stype"] == "cone":
-            return "锥孔" if c["kind"] == "hole" else "锥台"
-        if c["stype"] == "sphere":
-            return "球凹" if c["kind"] == "hole" else "球凸"
-        base = "孔" if c["kind"] == "hole" else "凸台"
-        if c["composite"]:
-            base = "复合沉孔" if c["kind"] == "hole" else "复合凸台"
-        return base
+        return feature_label(c.stype, c.kind, c.composite)
 
     def uv_of(c):
         if axis == "X":
-            return (c["loc3"][1], c["loc3"][2])
+            return (c.loc3[1], c.loc3[2])
         if axis == "Y":
-            return (c["loc3"][0], c["loc3"][2])
-        return (c["loc3"][0], c["loc3"][1])
+            return (c.loc3[0], c.loc3[2])
+        return (c.loc3[0], c.loc3[1])
 
     rows = ""
     for p in patterns:
@@ -790,25 +869,25 @@ def build_html(shape, singles, patterns, axis, silhouette, bbox, src_name):
                  f"<td>{p['radius']:.3f}</td><td>{p['count']} 个</td>"
                  f"<td>阵列分布（节圆 Ø{2*p['pitch']:.2f}）</td></tr>")
     for c in singles:
-        cid = c["id"]
+        cid = c.id
         idcell = ("#" + str(cid)) if isinstance(cid, int) else str(cid)
-        if c["stype"] == "cylinder" and c["composite"]:
+        if c.stype == "cylinder" and c.composite:
             dia = " / ".join(f"Ø{2*r:.2f}({idcell}.{k})"
-                             for k, r in enumerate(c["radii"], 1))
-        elif c["radii"]:
-            dia = " / ".join(f"Ø{2*r:.2f}" for r in c["radii"])
+                             for k, r in enumerate(c.radii, 1))
+        elif c.radii:
+            dia = " / ".join(f"Ø{2*r:.2f}" for r in c.radii)
         else:
             dia = "—"
-        axc = c["axis"] if c["axis"] is not None else "—"
+        axc = c.axis if c.axis is not None else "—"
         uu, vv = uv_of(c)
         rows += (f"<tr data-id=\"{cid}\"><td>{idcell}</td>"
                  f"<td>{typestr(c)}</td><td>{axc}</td>"
                  f"<td>{dia}</td>"
-                 f"<td>{c['extent']:.2f}</td>"
+                 f"<td>{c.extent:.2f}</td>"
                  f"<td>({uu:.2f}, {vv:.2f})</td></tr>")
 
     html = f"""<!doctype html><html><head><meta charset="utf-8">
-<title>{src_name} · 特征定位图</title>
+<title>{cad_core.html_escape_text(src_name)} · 特征定位图</title>
 <style>body{{font-family:-apple-system,Segoe UI,sans-serif;background:#f4f5f7;
 margin:0;padding:24px;color:#222}}
 h2{{margin:0 0 4px}}.sub{{color:#777;font-size:13px;margin-bottom:16px}}
@@ -825,7 +904,7 @@ tr.hl{{background:#fff3cd!important;outline:2px solid #f0ad4e}}
 .legend span{{display:inline-block;margin-right:16px;font-size:12px}}
 .dot{{display:inline-block;width:11px;height:11px;border-radius:50%;
 vertical-align:middle;margin-right:4px}}</style></head><body>
-<h2>{src_name} · 特征定位图</h2>
+<h2>{cad_core.html_escape_text(src_name)} · 特征定位图</h2>
 <div class="sub">枚举全部曲面并分类聚合（孔/凸台·圆角·平面·自由曲面）· 投影轴 = {axis} · 纯 OCP 生成</div>
 <div class="wrap">
 {''.join(svg)}
@@ -843,7 +922,7 @@ vertical-align:middle;margin-right:4px}}</style></head><body>
 {rows}
 </table>
 <div class="hint">
-用法：告诉我 <span class="b">"把 #{ (next((c['id'] for c in singles if c['kind']=='hole' and c['radius']<2.0), '?')) } 扩大 N 倍"</span>
+用法：告诉我 <span class="b">"把 #{ (next((c.id for c in singles if c.kind=='hole' and c.radius<2.0), '?')) } 扩大 N 倍"</span>
 即可精确指认，无需截图箭头。其它类型用前缀：<b>F</b>=圆角、<b>L</b>=平面、<b>S</b>=自由曲面（如"去掉 F3 圆角"）。<br>
 图例：<b>同心圆叠加</b> = 复合沉孔（大圆沉孔、小圆底孔，已合并为同一编号，子圈见 #N.k）；
 <b>橙色圆</b> = 圆角（环面，两端半径）；<b>灰色方块</b> = 平面/自由曲面（无直径参数，仅可点选定位）；
@@ -853,8 +932,14 @@ vertical-align:middle;margin-right:4px}}</style></head><body>
 const svg=document.getElementById('loc');
 function setHl(id,on){{
   svg.querySelectorAll('.feat[data-id="'+id+'"]').forEach(e=>{{
-    if(on){{e.setAttribute('stroke-width','3.4');e.classList.remove('dim');}}
-    else e.setAttribute('stroke-width', e.getAttribute('stroke-width'));
+    if(on){{
+      // capture the ORIGINAL stroke-width the first time we touch this
+      // element, so un-highlight can always restore it (not the '3.4' we
+      // just set on a previous hover).
+      if(!e.dataset.origSw) e.dataset.origSw = e.getAttribute('stroke-width');
+      e.setAttribute('stroke-width','3.4');e.classList.remove('dim');
+    }}
+    else e.setAttribute('stroke-width', e.dataset.origSw || e.getAttribute('stroke-width'));
   }});
   svg.querySelectorAll('.badge[data-id="'+id+'"]').forEach(e=>e.classList.toggle('dim',!on));
   document.querySelectorAll('tr[data-id="'+id+'"]').forEach(r=>r.classList.toggle('hl',on));
@@ -888,10 +973,15 @@ def main():
     assign_ids(singles, patterns)
     axis = args.axis if args.axis in ("x", "y", "z") else choose_axis(singles + patterns)
     axis = axis.upper()
-    bbox = _part_bbox(shape)
-    silhouette = project_edges(shape, axis)
-    if silhouette is None:
-        print("[warn] HLR silhouette unavailable", file=sys.stderr)
+    bbox = part_bbox(shape)
+    if bbox is not None:
+        silhouette = project_edges(shape, axis)
+        if silhouette is None:
+            print("[warn] HLR silhouette unavailable", file=sys.stderr)
+    else:
+        silhouette = None
+        print("[warn] empty/degenerate model (no vertices) -- skipping "
+              "silhouette projection", file=sys.stderr)
 
     base = os.path.splitext(os.path.basename(args.input))[0]
     out_dir = args.out_dir
@@ -902,11 +992,11 @@ def main():
     with open(html_path, "w", encoding="utf-8") as fh:
         fh.write(html)
 
-    feats_json = [{"id": c["id"], "type": c["stype"],
-                   "composite": c["composite"], "axis": c["axis"],
-                   "radii": [round(r, 4) for r in c["radii"]],
-                   "extent": round(c["extent"], 3),
-                   "location": [round(x, 3) for x in c["loc3"]]} for c in singles]
+    feats_json = [{"id": c.id, "type": c.stype,
+                   "composite": c.composite, "axis": c.axis,
+                   "radii": [round(r, 4) for r in c.radii],
+                   "extent": round(c.extent, 3),
+                   "location": [round(x, 3) for x in c.loc3]} for c in singles]
     feats_json += [{"id": p["id"], "type": "bolt_pattern",
                     "axis": p["axis"], "radius": round(p["radius"], 4),
                     "count": p["count"], "pitch": round(p["pitch"], 3),
