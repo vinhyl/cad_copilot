@@ -5,7 +5,25 @@
 
 ## [未发布]
 
-### 新增 (Added)
+### 新增 (Added)（Phase B）
+- **多层级爆炸图（ADR-0002 D3 / 模块二）**：`cad_assembly.parse_assembly` 为每个
+  非根节点计算**相对 explode 向量**（子树质心 − 父质心方向，同心兜底沿父包围盒
+  最长轴交替展开；幅值 clamp 到 [0.3, 0.8]×父尺寸）；前端滑条驱动，向量沿祖先
+  链累积实现分层爆炸（父动子随 + 子自身再展开）。
+- **特征拾取 API 化（模块四前置）**：`feature_picker.collect_feature_solids()`
+  公共 API（build() 重构复用，无跨模块私有调用）；`build_cache` 每模板导出
+  `features/tN.json`（分类元数据：孔/凸台/平面/圆角…含半径/轴向/长度）+
+  `features/tN.gltf`（每特征一个命名节点）；前端特征面板点条目 → 3D 橙色高亮
+  overlay（跟随实例矩阵，含爆炸偏移），模板 glTF 按 promise 缓存（失败可重试）。
+- **视图操作集补全（copilot-vision 模块二）**：隔离（只显选中子树）、X 光
+  （半透明鬼影）、Z 轴剖切面（clipping plane + 滑条）、临时拖拽移动
+  （TransformControls，选装配体整组移动）、复位移动、相机书签（localStorage）、
+  一键复位视图。
+- **E2E 验证修复 3 个 bug**：默认视野误用模板局部包围盒（实例世界矩阵修正）；
+  隔离只设 keep 未设其余隐藏；TransformControls attach 目标未入场景图。
+  另修特征 glTF 重复请求竞态 + 窄视口 fit 距离按纵横比自适应。
+
+### 新增 (Added)（Phase A）
 - **`frontend/`（Phase A 前端 SPA 骨架，ADR-0002 D3 / 模块二）**：Vite + three.js
   （0.160.0，与 vendor 一致）+ 原生 JS。装配 STEP → Template+Matrix 实例化渲染
   （每唯一零件一份 glTF 几何共享 InstancedMesh，实例矩阵取 manifest 世界 4×4）；
@@ -28,10 +46,11 @@
   多根 STEP → 合成根节点。
 - **MCP 新工具 `parse_assembly`（第 9 个）**：暴露上述能力给 agent，
   docstring 即契约；路径走 `CAD_MCP_ALLOWED_DIRS` 白名单。
-- **`tests/test_cad_assembly.py`（13 用例）+ `tests/test_cad_service.py`（19 用例）**：
+- **`tests/test_cad_assembly.py`（18 用例）+ `tests/test_cad_service.py`（19 用例）**：
   manifest 结构/矩阵/模板去重/R2 平铺兜底/缓存布局/MCP 契约（含路径逃逸拒绝）；
-  服务层 token 鉴权/SHA 键控幂等缓存/防穿越静态服务/WS 协议/`/app` SPA 服务
-  （index 与构建产物/回退/穿越不泄漏源码）。全量 **87/87 通过**。
+  Phase B 增：爆炸向量存在性与方向语义/平铺无爆炸/features 元数据与命名 glTF
+  节点一一对应/分类标签。服务层 token 鉴权/SHA 键控幂等缓存/防穿越静态服务/
+  WS 协议/`/app` SPA 服务。全量 **92/92 通过**。
 
 ### 工程验证 (Engineering)
 - **Phase A 去风险 spike 全部通过**（XCAF + glTF，2026-08-19）：

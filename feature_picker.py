@@ -98,22 +98,24 @@ def _group_faces_by_canonical_radius(c):
     return [(r, groups[r]) for r in radii if groups[r]]
 
 
-def build(shape):
+def collect_feature_solids(shape):
+    """Enumerate a shape's features as (metadata, solid) pairs — PUBLIC API.
+
+    Same classification/grouping as build(), but returns the per-feature
+    TopoDS_Compound solid instead of meshing it, so other modules (e.g.
+    cad_assembly's features glTF export) can consume feature geometry
+    without going through base64 STL (H7: no cross-module private calls).
+
+    Returns a list of dicts: {id, gid, ring, type, composite, axis, radii,
+    extent, location, center, color, label, count?, pitch?, solid}.
+    """
     feats_all = fl.collect_features(shape)
     comps = fl.group_features(feats_all)
     singles, patterns = fl.detect_patterns(comps)
     fl.assign_ids(singles, patterns)
 
-    props = cad_core.properties(shape)
-    size = props["bounding_box"]["size"]
-    maxdim = max(size) or 1.0
-    deflection = max(min(maxdim / 800.0, 0.5), 1e-5)
-
-    body_b64 = base64.b64encode(cad_core.mesh_shape(shape, deflection)).decode("ascii")
-
-    feats = []
+    out = []
     for c in singles:
-        # category-aware kind + colour
         if c.axis is None:
             kind = "surface"
         elif c.stype == "torus":
@@ -125,44 +127,51 @@ def build(shape):
         dtype = c.stype if kind == "surface" else kind
         base_fid = f"#{c.id}" if isinstance(c.id, int) else str(c.id)
         if c.composite and c.stype in ("cylinder", "cone", "sphere", "torus"):
-            # split composite (counterbore / stepped hole / multi-radius
-            # fillet such as F7) into individual concentric rings, each
-            # pickable as #{gid}.{ring}
             for k, (r, rfaces) in enumerate(_group_faces_by_canonical_radius(c), 1):
-                comp = _compound_of(rfaces)
-                b64 = base64.b64encode(cad_core.mesh_shape(comp, deflection)).decode("ascii")
-                # per-sub-ring centroid so each ring has its own 3D position
-                # (parent's loc3 would give the same xyz to every ring → markers
-                # overlap). Fall back to parent loc3 if BRepGProp fails.
                 ring_loc = cad_core.centroid_of_faces(rfaces) or c.loc3
-                feats.append({"id": f"{base_fid}.{k}", "gid": c.id, "ring": k,
-                              "type": dtype, "composite": True, "axis": c.axis,
-                              "radii": [round(r, 4)],
-                              "extent": round(c.extent, 3),
-                              "location": [round(x, 3) for x in ring_loc],
-                              "center": [round(x, 3) for x in ring_loc],
-                              "b64": b64, "color": color, "label": label})
+                out.append({"id": f"{base_fid}.{k}", "gid": c.id, "ring": k,
+                            "type": dtype, "composite": True, "axis": c.axis,
+                            "radii": [round(r, 4)],
+                            "extent": round(c.extent, 3),
+                            "location": [round(x, 3) for x in ring_loc],
+                            "center": [round(x, 3) for x in ring_loc],
+                            "color": color, "label": label,
+                            "solid": _compound_of(rfaces)})
         else:
-            comp = _compound_of(c.faces)
-            b64 = base64.b64encode(cad_core.mesh_shape(comp, deflection)).decode("ascii")
-            feats.append({"id": base_fid, "gid": c.id, "ring": 0,
-                          "type": dtype, "composite": c.composite,
-                          "axis": c.axis,
-                          "radii": [round(r, 4) for r in c.radii],
-                          "extent": round(c.extent, 3),
-                          "location": [round(x, 3) for x in c.loc3],
-                          "center": [round(x, 3) for x in c.loc3],
-                          "b64": b64, "color": color, "label": label})
+            out.append({"id": base_fid, "gid": c.id, "ring": 0,
+                        "type": dtype, "composite": c.composite,
+                        "axis": c.axis,
+                        "radii": [round(r, 4) for r in c.radii],
+                        "extent": round(c.extent, 3),
+                        "location": [round(x, 3) for x in c.loc3],
+                        "center": [round(x, 3) for x in c.loc3],
+                        "color": color, "label": label,
+                        "solid": _compound_of(c.faces)})
     for p in patterns:
-        comp = _compound_of(p["faces"])
-        b64 = base64.b64encode(cad_core.mesh_shape(comp, deflection)).decode("ascii")
-        feats.append({"id": p["id"], "gid": p["id"], "ring": 0,
-                      "type": "bolt_pattern", "axis": p["axis"],
-                      "radii": [round(p["radius"], 4)],
-                      "extent": round(p["extent"], 3),
-                      "center": [round(x, 3) for x in p["center"]],
-                      "count": p["count"], "pitch": round(p["pitch"], 3),
-                      "b64": b64, "color": "#8a6d3b", "label": "螺栓孔组"})
+        out.append({"id": p["id"], "gid": p["id"], "ring": 0,
+                    "type": "bolt_pattern", "axis": p["axis"],
+                    "radii": [round(p["radius"], 4)],
+                    "extent": round(p["extent"], 3),
+                    "center": [round(x, 3) for x in p["center"]],
+                    "count": p["count"], "pitch": round(p["pitch"], 3),
+                    "color": "#8a6d3b", "label": "螺栓孔组",
+                    "solid": _compound_of(p["faces"])})
+    return out
+
+
+def build(shape):
+    props = cad_core.properties(shape)
+    size = props["bounding_box"]["size"]
+    maxdim = max(size) or 1.0
+    deflection = max(min(maxdim / 800.0, 0.5), 1e-5)
+
+    body_b64 = base64.b64encode(cad_core.mesh_shape(shape, deflection)).decode("ascii")
+    feats = []
+    for f in collect_feature_solids(shape):
+        solid = f.pop("solid")
+        f["b64"] = base64.b64encode(
+            cad_core.mesh_shape(solid, deflection)).decode("ascii")
+        feats.append(f)
     return body_b64, feats, props
 
 

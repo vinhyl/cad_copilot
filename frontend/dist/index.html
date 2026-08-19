@@ -4,8 +4,8 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>CAD Copilot</title>
-    <script type="module" crossorigin src="/app/assets/index-DJ47T-F0.js"></script>
-    <link rel="stylesheet" crossorigin href="/app/assets/index-BR5q7S_j.css">
+    <script type="module" crossorigin src="/app/assets/index-P3LuftE1.js"></script>
+    <link rel="stylesheet" crossorigin href="/app/assets/index-DonLrk6G.css">
   </head>
   <body>
     <div id="app">
@@ -20,8 +20,38 @@
         </form>
         <div id="status" class="idle">输入路径并加载</div>
         <div id="tree"></div>
+        <div id="feature-panel" class="hidden">
+          <div class="fp-head">
+            <span id="fp-title">特征</span>
+            <button id="fp-close" title="关闭">×</button>
+          </div>
+          <div id="fp-list"></div>
+        </div>
       </aside>
-      <main id="viewport"></main>
+      <main id="viewport">
+        <div id="toolbar">
+          <div class="tb-group" title="多层级爆炸：拖动改变爆炸比例">
+            <span class="tb-label">爆炸</span>
+            <input type="range" id="explode-slider" min="0" max="100" value="0" />
+            <span class="tb-value" id="explode-val">0%</span>
+          </div>
+          <div class="tb-group">
+            <button id="btn-xray" title="透明鬼影模式（X 光）">X 光</button>
+            <button id="btn-isolate" title="只显示选中节点，其余隐藏">隔离</button>
+            <button id="btn-move" title="拖拽移动选中节点（临时，不落盘）">移动</button>
+            <button id="btn-reset-moves" title="复位全部临时移动">复位移动</button>
+          </div>
+          <div class="tb-group" title="Z 轴剖切面">
+            <label class="tb-toggle"><input type="checkbox" id="section-on" /> 剖切</label>
+            <input type="range" id="section-slider" min="0" max="100" value="100" />
+          </div>
+          <div class="tb-group">
+            <button id="btn-cam-save" title="保存当前视角">存视角</button>
+            <button id="btn-cam-restore" title="恢复已存视角">回视角</button>
+            <button id="btn-view-reset" title="复位视图（爆炸/显隐/临时移动/相机）">复位视图</button>
+          </div>
+        </div>
+      </main>
     </div>
   </body>
 </html>

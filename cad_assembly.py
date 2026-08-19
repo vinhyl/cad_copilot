@@ -34,6 +34,17 @@ after the file. Unnamed parts get deterministic fallback names (Part_1...).
 Per-template STEP export (for D10 version management) is a future increment;
 this module currently exports glTF only.
 
+Phase B additions:
+  * explosion vectors -- every non-root node gets ``explode`` [dx,dy,dz]:
+    direction = child subtree centroid - parent centroid (fallback: parent
+    bbox longest axis, alternating sign), magnitude >= 0.3 * parent size.
+    Frontend accumulates along the ancestor chain and scales by the slider
+    ratio (multi-level explosion, copilot-vision 模块二).
+  * per-template features -- ``features/tN.json`` (metadata list from
+    feature_locator classification via feature_picker.collect_feature_solids)
+    + ``features/tN.gltf`` (one named node per feature id) for feature-level
+    picking overlays in the Web frontend (Phase B 拾取 API 化).
+
 OCP quirks are documented in tests/_assembly_helpers.py (spike learnings);
 this module is the production path for the same functionality.
 """
@@ -113,6 +124,115 @@ def _new_xcaf_doc():
 
 def _matrix_rows(trsf) -> list:
     return [[round(trsf.Value(r, c), 6) for c in range(1, 5)] for r in range(1, 4)]
+
+
+def _template_metrics(shape):
+    """(centroid xyz, bbox min xyz, bbox max xyz, volume) of a template shape."""
+    from OCP.Bnd import Bnd_Box
+    from OCP.BRepBndLib import BRepBndLib
+    from OCP.BRepGProp import BRepGProp
+    from OCP.GProp import GProp_GProps
+
+    p = GProp_GProps()
+    BRepGProp.VolumeProperties_s(shape, p)
+    c = p.CentreOfMass()
+    box = Bnd_Box()
+    BRepBndLib.Add_s(shape, box)
+    try:
+        xmin, ymin, zmin, xmax, ymax, zmax = box.Get()
+    except TypeError:
+        pmin, pmax = box.Get()
+        xmin, ymin, zmin = pmin.X(), pmin.Y(), pmin.Z()
+        xmax, ymax, zmax = pmax.X(), pmax.Y(), pmax.Z()
+    return ((c.X(), c.Y(), c.Z()), (xmin, ymin, zmin), (xmax, ymax, zmax),
+            p.Mass() or 1.0)
+
+
+def _apply_matrix(m: list, pt: tuple) -> tuple:
+    """Apply a 3x4 row-major matrix to a point."""
+    return tuple(m[i][0] * pt[0] + m[i][1] * pt[1] + m[i][2] * pt[2] + m[i][3]
+                 for i in range(3))
+
+
+def _union_bbox(a, b):
+    if a is None:
+        return b
+    return (tuple(min(x, y) for x, y in zip(a[0], b[0])),
+            tuple(max(x, y) for x, y in zip(a[1], b[1])))
+
+
+def _compute_explosion(root: dict, templates: dict) -> None:
+    """Attach relative explode vectors to every non-root node (in place).
+
+    Bottom-up pass computes each node's volume-weighted world centroid and
+    world bbox; top-down pass sets child.explode = dir * mag where
+    dir = child_center - parent_center (fallback: parent bbox longest axis,
+    alternating sign by child index) and mag is clamped to
+    [0.3, 0.8] * parent_maxdim.
+    """
+    tinfo = templates  # tid -> {centroid, bbox, volume}
+
+    def bottom_up(node):
+        """Returns (world_center, world_bbox, subtree_volume)."""
+        if node["type"] == "part":
+            t = tinfo[node["template"]]
+            c = _apply_matrix(node["matrix"], t["centroid"])
+            bmin = _apply_matrix(node["matrix"], t["bbox"][0])
+            bmax = _apply_matrix(node["matrix"], t["bbox"][1])
+            bbox = (tuple(min(a, b) for a, b in zip(bmin, bmax)),
+                    tuple(max(a, b) for a, b in zip(bmin, bmax)))
+            node["_center"] = c
+            node["_bbox"] = bbox
+            return c, bbox, t["volume"]
+        center = (0.0, 0.0, 0.0)
+        bbox = None
+        vol = 0.0
+        for ch in node["children"]:
+            c, b, v = bottom_up(ch)
+            center = tuple(x + y * v for x, y in zip(center, c))
+            bbox = _union_bbox(bbox, b)
+            vol += v
+        if vol <= 0:
+            vol = 1.0
+        center = tuple(x / vol for x in center)
+        node["_center"] = center
+        node["_bbox"] = bbox
+        return center, bbox, vol
+
+    bottom_up(root)
+
+    def top_down(node):
+        kids = node.get("children", [])
+        if not kids:
+            return
+        span = (tuple(hi - lo for lo, hi in zip(node["_bbox"][0], node["_bbox"][1]))
+                if node["_bbox"] else (1.0, 1.0, 1.0))
+        maxdim = max(span) or 1.0
+        axis_idx = span.index(max(span))
+        for i, ch in enumerate(kids):
+            v = tuple(a - b for a, b in zip(ch["_center"], node["_center"]))
+            dist = (v[0] ** 2 + v[1] ** 2 + v[2] ** 2) ** 0.5
+            if dist < 1e-6 * maxdim:
+                # concentric children: spread along the parent's longest axis
+                sign = 1.0 if i % 2 == 0 else -1.0
+                d = [0.0, 0.0, 0.0]
+                d[axis_idx] = sign
+                mag = 0.5 * maxdim
+            else:
+                d = [x / dist for x in v]
+                mag = min(max(dist, 0.3 * maxdim), 0.8 * maxdim)
+            ch["explode"] = [round(x * mag, 4) for x in d]
+            top_down(ch)
+
+    top_down(root)
+
+    def strip(node):
+        node.pop("_center", None)
+        node.pop("_bbox", None)
+        for ch in node.get("children", []):
+            strip(ch)
+
+    strip(root)
 
 
 # --------------------------------------------------------------------------
@@ -233,6 +353,13 @@ def parse_assembly(input_path: str) -> dict:
 
     root = _synthetic_root(tree_children, input_path)
 
+    # Phase B: multi-level explosion vectors (relative, per non-root node)
+    tinfo = {}
+    for t in templates:
+        c, bmin, bmax, vol = _template_metrics(t["shape"])
+        tinfo[t["id"]] = {"centroid": c, "bbox": (bmin, bmax), "volume": vol}
+    _compute_explosion(root, tinfo)
+
     return {
         "schema_version": SCHEMA_VERSION,
         "source_file": os.path.basename(input_path),
@@ -295,26 +422,84 @@ def _export_template_gltf(shape, name, color, gltf_path: str) -> None:
 
 
 # --------------------------------------------------------------------------
+# Per-template feature export (Phase B 拾取 API 化)
+# --------------------------------------------------------------------------
+
+def _export_features_gltf(feature_solids: list, gltf_path: str) -> None:
+    """Write one named XCAF shape per feature as a textual glTF.
+
+    Node names in the glTF are the feature ids (e.g. "#3", "#7.2", "P1"),
+    so the frontend can map metadata entries to overlay meshes 1:1.
+    """
+    from OCP.XCAFDoc import XCAFDoc_DocumentTool
+    from OCP.TDataStd import TDataStd_Name
+    from OCP.TCollection import TCollection_ExtendedString
+    from OCP.BRepMesh import BRepMesh_IncrementalMesh
+    from OCP.RWGltf import RWGltf_CafWriter
+    from OCP.TColStd import TColStd_IndexedDataMapOfStringString
+    from OCP.Message import Message_ProgressRange
+    from OCP.TCollection import TCollection_AsciiString
+
+    doc = _new_xcaf_doc()
+    st = XCAFDoc_DocumentTool.ShapeTool_s(doc.Main())
+    for f in feature_solids:
+        lbl = st.AddShape(f["solid"], False)
+        TDataStd_Name.Set_s(lbl, TCollection_ExtendedString(f["id"]))
+        BRepMesh_IncrementalMesh(f["solid"], 0.1)
+    w = RWGltf_CafWriter(TCollection_AsciiString(gltf_path), False)  # textual
+    info = TColStd_IndexedDataMapOfStringString()
+    if not w.Perform(doc, info, Message_ProgressRange()):
+        raise RuntimeError(f"RWGltf_CafWriter.Perform failed: {gltf_path}")
+
+
+def _build_template_features(shape, feats_dir: str, tid: str) -> str | None:
+    """Compute features for one template; write feats_dir/tid.{json,gltf}.
+
+    Returns the relative metadata path (or None when the shape yields no
+    features -- degenerate input guard).
+    """
+    import feature_picker  # lazy: heavy imports stay behind first use
+
+    solids = feature_picker.collect_feature_solids(shape)
+    if not solids:
+        return None
+    os.makedirs(feats_dir, exist_ok=True)
+    meta = [{k: v for k, v in f.items() if k != "solid"} for f in solids]
+    with open(os.path.join(feats_dir, f"{tid}.json"), "w", encoding="utf-8") as fh:
+        json.dump(meta, fh, ensure_ascii=False, indent=2)
+    _export_features_gltf(solids, os.path.join(feats_dir, f"{tid}.gltf"))
+    return f"features/{tid}.json"
+
+
+# --------------------------------------------------------------------------
 # Cache build (workspace/cache layout from the vision doc)
 # --------------------------------------------------------------------------
 
 def build_cache(input_path: str, out_dir: str) -> dict:
     """Parse an assembly STEP and write the frontend cache layout.
 
-    Writes ``tree_structure.json`` + ``gltf_library/tN.gltf(.bin)`` under
-    out_dir and returns the manifest dict (with relative gltf paths filled
-    in). Existing outputs are overwritten (cache semantics, R8: cache is
-    keyed by source sha256 which is stored in the manifest).
+    Writes under out_dir (existing outputs are overwritten -- cache
+    semantics, R8: cache is keyed by the source sha256 stored in the
+    manifest):
+      tree_structure.json          manifest (tree + explode + templates)
+      gltf_library/tN.gltf(.bin)   one glTF per unique part template
+      features/tN.json + tN.gltf   per-template feature metadata + meshes
     """
     manifest = parse_assembly(input_path)
     shapes = manifest.pop("_shapes")
 
     lib = os.path.join(out_dir, "gltf_library")
     os.makedirs(lib, exist_ok=True)
+    feats_dir = os.path.join(out_dir, "features")
     for t in manifest["templates"]:
         gltf = os.path.join(lib, f"{t['id']}.gltf")
         _export_template_gltf(shapes[t["id"]], t["name"], t["color"], gltf)
         t["gltf"] = f"gltf_library/{t['id']}.gltf"
+        try:
+            t["features"] = _build_template_features(
+                shapes[t["id"]], feats_dir, t["id"])
+        except Exception:  # noqa: BLE001 -- feature export is best-effort
+            t["features"] = None
 
     tree_path = os.path.join(out_dir, "tree_structure.json")
     with open(tree_path, "w", encoding="utf-8") as f:

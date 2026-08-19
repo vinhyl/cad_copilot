@@ -103,12 +103,23 @@ venv/Scripts/python cad_service.py     # http://127.0.0.1:8764（token 启动时
 配置：`CAD_SERVICE_TOKEN` / `CAD_SERVICE_ALLOWED_DIRS` / `CAD_SERVICE_WORKSPACE` /
 `CAD_SERVICE_HOST` / `CAD_SERVICE_PORT` / `CAD_SERVICE_FRONTEND_DIR`。
 
-## Web 前端（Phase A 骨架）
+## Web 前端（Phase A/B）
 
 `frontend/` 为 Vite + three.js（版本与 `vendor/` 一致：three@0.160.0）+ 原生 JS 的
-SPA 骨架：加载装配 STEP → **Template+Matrix 实例化渲染**（每个唯一零件一份 glTF
+SPA：加载装配 STEP → **Template+Matrix 实例化渲染**（每个唯一零件一份 glTF
 几何，全部实例共享 `InstancedMesh`，矩阵来自 manifest 的累积世界 4×4）+ 装配树 UI
 （选择层级双向联动：树上点选高亮 3D 实例 / 视口点选定位树上节点；按节点显隐）。
+
+**Phase B 视图操作集**（视图状态 ≠ 数据状态，全部不落盘）：
+
+| 操作 | 入口 | 说明 |
+|---|---|---|
+| 多层级爆炸 | 工具栏滑条 | 后端算好的相对 explode 向量沿祖先链累积 × 比例 |
+| 特征拾取 | 选中零件 → 侧栏特征面板 | 点特征条目 → 3D 橙色高亮 overlay（cache `features/*.json|gltf`） |
+| 隔离 / X 光 / 剖切面 | 工具栏 | 只显选中子树 / 半透明鬼影 / Z 轴 clipping plane |
+| 临时拖拽移动 | 选中 →「移动」 | TransformControls gizmo，选装配体整组移动；「复位移动」还原 |
+| 相机书签 | 「存视角 / 回视角」 | localStorage，不进版本树 |
+| 复位视图 | 一键 | 爆炸/显隐/临时移动/相机全部还原 |
 
 - **使用（零 Node 依赖）**：`venv/Scripts/python cad_service.py` 后浏览器打开
   `http://127.0.0.1:8764/app/`，token 支持 `?token=...` 一次性注入。构建产物
@@ -209,7 +220,7 @@ previews/
 - `cad_build.py` — build123d 字体 import-hook（跨平台无害，修复损坏系统字体导致 import 崩溃）
 - `vendor/` — 本地 three.js（three@0.160.0：`three.module.min.js` + `OrbitControls` + `STLLoader`）；见 [vendor/README.md](vendor/README.md)
 - `frontend/` — Web 前端 SPA（Vite + three.js，Phase A 骨架）；`dist/` 构建产物随仓库提交（离线运行无需 Node）
-- `tests/` — pytest 测试套件（Phase 3 建立；Phase A 增装配/服务层/前端服务用例，当前 **87 个用例全绿**）
+- `tests/` — pytest 测试套件（Phase 3 建立；Phase A/B 增装配/服务层/前端服务用例，当前 **92 个用例全绿**）
 - `pytest.ini` — pytest 配置（含 `--cov` 覆盖率）
 - `docs/architecture/copilot-vision.md` — Web Copilot 系统设想（原根目录 `设想.txt` 迁入；文首附与 ADR-0002 的差异摘要）
 - `docs/decisions/0001-ocp-vs-freecad-base.md` — ADR-0001：OCP 轻量底座 vs FreeCAD 方案对比（原 `comparison.md`）

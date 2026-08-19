@@ -173,3 +173,78 @@ def test_mcp_parse_assembly_path_escape_rejected(assembly_step):
     import cad_mcp_server
     with pytest.raises(ValueError):
         cad_mcp_server.parse_assembly(assembly_step, out_dir="../outside")
+
+
+# --------------------------------------------------------------------------
+# Phase B: explosion vectors (multi-level, relative per non-root node)
+# --------------------------------------------------------------------------
+
+def test_explode_vectors_present_and_relative(manifest):
+    by_depth = {}
+    for d, n in _flatten(manifest["root"]):
+        by_depth.setdefault(n["name"], []).append((d, n))
+
+    # root has no explode; every non-root node does
+    root = manifest["root"]
+    assert "explode" not in root
+    for d, n in _flatten(manifest["root"]):
+        if n is not root:
+            assert "explode" in n and len(n["explode"]) == 3
+
+    # BasePlate sits at origin side, BearingComp at +X side of the assembly:
+    # their explode vectors must point away from each other along X
+    plate = by_depth["BasePlate"][0][1]
+    sub = by_depth["BearingComp"][0][1]
+    assert sub["explode"][0] > 0          # BearingComp moves further +X
+    assert plate["explode"][0] < 0         # BasePlate moves -X
+    # magnitude within the documented clamp [0.3, 0.8] * parent_maxdim
+    mag_plate = sum(x ** 2 for x in plate["explode"]) ** 0.5
+    assert mag_plate > 0
+
+    # bolts explode relative to BearingComp (their own local spread),
+    # roughly +X / -X around the sub-assembly center: distinct vectors
+    bolts = [n for d, n in _flatten(manifest["root"]) if n["name"] == "M4x8_Bolt"]
+    assert bolts[0]["explode"] != bolts[1]["explode"]
+
+
+def test_explode_flat_step_has_no_vectors(selftest_step):
+    m = cad_assembly.parse_assembly(selftest_step)
+    assert "explode" not in m["root"]   # single part: nothing to explode
+
+
+# --------------------------------------------------------------------------
+# Phase B: per-template features export (拾取 API 化 data layer)
+# --------------------------------------------------------------------------
+
+def test_features_exported_in_cache(cache_dir):
+    for tid in ("t0", "t1"):
+        meta = json.load(open(os.path.join(cache_dir, "features", f"{tid}.json"),
+                              encoding="utf-8"))
+        assert len(meta) >= 3           # box: 6 planes grouped; bolt: cyl + 2 planes
+        for f in meta:
+            assert {"id", "label", "type", "color", "radii"} <= set(f)
+            assert "solid" not in f     # internal OCP handle never serialised
+        # glTF exists and has one named node per feature id
+        g = json.load(open(os.path.join(cache_dir, "features", f"{tid}.gltf"),
+                           encoding="utf-8"))
+        named = {nd.get("name") for nd in g.get("nodes", [])}
+        for f in meta:
+            assert f["id"] in named
+
+
+def test_manifest_references_features(cache_dir):
+    m = cad_assembly.load_cache(cache_dir)
+    for t in m["templates"]:
+        assert t["features"] == f"features/{t['id']}.json"
+
+
+def test_features_labels_classified(cache_dir):
+    """BasePlate (box) -> 平面 features; bolt -> cylinder (hole/boss) + planes."""
+    meta = json.load(open(os.path.join(cache_dir, "features", "t0.json"),
+                          encoding="utf-8"))
+    assert all(f["label"] == "平面" for f in meta)
+    bolt = json.load(open(os.path.join(cache_dir, "features", "t1.json"),
+                          encoding="utf-8"))
+    labels = {f["label"] for f in bolt}
+    assert labels & {"孔", "凸台"}       # cylindrical side face classified
+    assert "平面" in labels

@@ -261,9 +261,10 @@ def parse_assembly(input_path: str, out_dir: str = "") -> str:
     """Parse an assembly STEP into a decoupled Template + Matrix manifest.
 
     Returns JSON with: the assembly tree (named nodes, each carrying its
-    accumulated world 4x4 matrix), and a deduplicated part-template list --
-    every unique part appears once (same-spec instances share one template),
-    with per-template glTF geometry for the Web frontend.
+    accumulated world 4x4 matrix and a relative multi-level ``explode``
+    vector), and a deduplicated part-template list -- every unique part
+    appears once (same-spec instances share one template), with per-template
+    glTF geometry for the Web frontend.
 
     A flat single-solid STEP is handled too (becomes a one-part tree with a
     fallback name); a multi-root STEP gets a synthetic root named after the
@@ -272,6 +273,8 @@ def parse_assembly(input_path: str, out_dir: str = "") -> str:
     When out_dir is given, also writes the frontend cache layout:
       out_dir/tree_structure.json     (the manifest itself)
       out_dir/gltf_library/tN.gltf/.bin (one glTF per unique part template)
+      out_dir/features/tN.json + tN.gltf (per-template feature metadata and
+        named per-feature meshes, for feature-level picking overlays)
     Existing cache files are overwritten (cache semantics; the manifest
     carries the source SHA-256 as its cache key).
 

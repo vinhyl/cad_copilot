@@ -18,22 +18,181 @@ if (!getToken()) {
 // ---- 组件 ----
 const scene = new AssemblyScene(document.getElementById('viewport'));
 const tree = new AssemblyTree(document.getElementById('tree'), {
-  onSelect: (id) => scene.highlight(tree.partIdsUnder(id)),
+  onSelect: (id) => selectNode(id),
   onToggle: (visMap) => scene.applyVisibility(visMap),
 });
 scene.onPick((id) => tree.select(id));
 
+// ---- 选择状态（选择层级交互原则：装配树定层级） ----
+let selectedId = null;
+let moveMode = false;
+
+function selectNode(id) {
+  selectedId = id;
+  scene.highlight(tree.partIdsUnder(id));
+  if (moveMode) {
+    scene.enableMove(tree.partIdsUnder(id));   // 选装配体 → 整组移动
+  }
+  updateFeaturePanel();
+}
+
+// ---- 工具栏 ----
+const $ = (s) => document.querySelector(s);
+const explodeSlider = $('#explode-slider');
+const explodeVal = $('#explode-val');
+const sectionOn = $('#section-on');
+const sectionSlider = $('#section-slider');
+const btnXray = $('#btn-xray');
+const btnIsolate = $('#btn-isolate');
+const btnMove = $('#btn-move');
+
+explodeSlider.addEventListener('input', () => {
+  const ratio = explodeSlider.value / 100;
+  explodeVal.textContent = `${explodeSlider.value}%`;
+  scene.applyExplosion(ratio);
+});
+
+btnXray.addEventListener('click', () => {
+  const on = !btnXray.classList.contains('active');
+  btnXray.classList.toggle('active', on);
+  scene.setXray(on);
+});
+
+btnIsolate.addEventListener('click', () => {
+  if (!selectedId) { status('先在装配树或视口中选择节点', true); return; }
+  const keep = tree.partIdsUnder(selectedId);
+  const vis = new Map();
+  for (const [id, rec] of tree.nodes) {
+    if (rec.node.type === 'part') vis.set(id, keep.has(id));   // 其余全部隐藏
+  }
+  scene.applyVisibility(vis);
+});
+
+btnMove.addEventListener('click', () => {
+  if (!selectedId) { status('先在装配树或视口中选择节点', true); return; }
+  moveMode = !moveMode;
+  btnMove.classList.toggle('active', moveMode);
+  if (moveMode) scene.enableMove(tree.partIdsUnder(selectedId));
+  else scene.disableMove();
+});
+
+$('#btn-reset-moves').addEventListener('click', () => scene.resetTempMoves());
+
+// 剖切面：slider 0-100 映射到整体 bbox 的 Z 范围
+function sectionPos() {
+  const b = scene.bbox;
+  if (!b || b.isEmpty()) return 0;
+  return b.min.z + (b.max.z - b.min.z) * (sectionSlider.value / 100);
+}
+function applySection() {
+  scene.setSection(sectionOn.checked, sectionPos());
+}
+sectionOn.addEventListener('change', applySection);
+sectionSlider.addEventListener('input', applySection);
+
+// 相机书签（localStorage，视图配置不落版本树）
+const CAM_KEY = 'cad_cam_bookmark';
+$('#btn-cam-save').addEventListener('click', () => {
+  localStorage.setItem(CAM_KEY, JSON.stringify(scene.getCameraState()));
+  status('视角已保存');
+});
+$('#btn-cam-restore').addEventListener('click', () => {
+  const s = JSON.parse(localStorage.getItem(CAM_KEY) || 'null');
+  if (s) scene.setCameraState(s);
+  else status('尚无已保存视角', true);
+});
+
+$('#btn-view-reset').addEventListener('click', () => {
+  scene.applyExplosion(0);
+  explodeSlider.value = 0;
+  explodeVal.textContent = '0%';
+  scene.setXray(false);
+  btnXray.classList.remove('active');
+  sectionOn.checked = false;
+  applySection();
+  moveMode = false;
+  btnMove.classList.remove('active');
+  scene.disableMove();
+  scene.resetTempMoves();
+  scene.highlight(null);
+  tree.render(lastManifest.root);   // 显隐复选框全部复位
+  scene.applyVisibility(tree.effectiveVisibility());
+  scene._fitCamera();
+  status('视图已复位');
+});
+
+// ---- 特征面板（拾取 API 化：cache features JSON + glTF overlay） ----
+const fp = $('#feature-panel');
+const fpTitle = $('#fp-title');
+const fpList = $('#fp-list');
+$('#fp-close').addEventListener('click', () => {
+  fp.classList.add('hidden');
+  scene.showFeature(null, null);
+});
+
+function updateFeaturePanel() {
+  if (!selectedId) { fp.classList.add('hidden'); return; }
+  const partIds = tree.partIdsUnder(selectedId);
+  // 特征面板只针对零件节点（装配体选择显示提示）
+  if (partIds.size !== 1 || !tree.nodes.get(selectedId)) {
+    fp.classList.add('hidden');
+    return;
+  }
+  const node = tree.nodes.get(selectedId).node;
+  if (node.type !== 'part') {
+    fp.classList.add('hidden');
+    return;
+  }
+  const tid = scene.templateOf(node.id);
+  const tpl = lastManifest.templates.find((t) => t.id === tid);
+  if (!tpl?.features) { fp.classList.add('hidden'); return; }
+
+  fetch(`${lastBaseUrl}/${tpl.features}`)
+    .then((r) => r.json())
+    .then((feats) => {
+      fpTitle.textContent = `${node.name} · ${feats.length} 特征`;
+      fpList.innerHTML = '';
+      feats.forEach((f) => {
+        const row = document.createElement('div');
+        row.className = 'fp-row';
+        const dot = document.createElement('span');
+        dot.className = 'fp-dot';
+        dot.style.background = f.color;
+        const name = document.createElement('span');
+        name.className = 'fp-name';
+        name.textContent = `${f.label} ${f.id}`;
+        const dim = document.createElement('span');
+        dim.className = 'fp-dim';
+        const r = (f.radii || []).map((x) => `R${x}`).join('/');
+        dim.textContent = [f.axis, r, f.extent ? `L${f.extent}` : null]
+          .filter(Boolean).join(' ');
+        row.append(dot, name, dim);
+        row.addEventListener('click', () => {
+          fpList.querySelectorAll('.fp-row').forEach((x) => x.classList.remove('selected'));
+          row.classList.add('selected');
+          scene.showFeature(node.id, f.id);
+        });
+        fpList.appendChild(row);
+      });
+      fp.classList.remove('hidden');
+    })
+    .catch(() => fp.classList.add('hidden'));
+}
+
 // ---- 加载表单 ----
-const form = document.getElementById('load-form');
-const pathInput = document.getElementById('path-input');
-const forceBox = document.getElementById('force');
-const loadBtn = document.getElementById('load-btn');
-const statusEl = document.getElementById('status');
+const form = $('#load-form');
+const pathInput = $('#path-input');
+const forceBox = $('#force');
+const loadBtn = $('#load-btn');
+const statusEl = $('#status');
 
 function status(text, isError = false) {
   statusEl.textContent = text;
   statusEl.className = isError ? 'error' : 'ok';
 }
+
+let lastManifest = null;
+let lastBaseUrl = null;
 
 form.addEventListener('submit', async (e) => {
   e.preventDefault();
@@ -43,9 +202,17 @@ form.addEventListener('submit', async (e) => {
   status('解析中…');
   try {
     const res = await parseAssembly(p, forceBox.checked);
+    lastManifest = res.manifest;
+    lastBaseUrl = res.base_url;
     const count = await scene.load(res.manifest, res.base_url);
     tree.render(res.manifest.root);
     scene.highlight(null);
+    selectedId = null;
+    fp.classList.add('hidden');
+    explodeSlider.value = 0;
+    explodeVal.textContent = '0%';
+    scene.applyExplosion(0);
+    applySection();
     status(
       `${res.manifest.source_file} · ${res.manifest.templates.length} 模板 · ` +
       `${count} 实例 · ${res.cache_hit ? '缓存命中' : '新建缓存'}`,
