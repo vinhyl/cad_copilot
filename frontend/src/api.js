@@ -9,15 +9,45 @@ export function setToken(t) {
 }
 
 export async function parseAssembly(inputPath, force = false) {
-  const r = await fetch('/api/assembly/parse', {
+  return _post('/api/assembly/parse', { input_path: inputPath, force });
+}
+
+/** Phase C: 编辑（干涉守门 + 原子提交）。409 时抛出带 interferences 的错误。 */
+export async function editAssembly(cacheKey, templateId, operation, params) {
+  return _post('/api/assembly/edit', {
+    cache_key: cacheKey, template_id: templateId,
+    operation, params,
+  });
+}
+
+export async function listVersions(cacheKey) {
+  const r = await fetch(`/api/versions?cache_key=${encodeURIComponent(cacheKey)}`, {
+    headers: { Authorization: `Bearer ${getToken()}` },
+  });
+  const body = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(body.error || `HTTP ${r.status}`);
+  return body;
+}
+
+export async function checkoutVersion(cacheKey, version) {
+  return _post('/api/versions/checkout', { cache_key: cacheKey, version });
+}
+
+async function _post(url, payload) {
+  const r = await fetch(url, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       Authorization: `Bearer ${getToken()}`,
     },
-    body: JSON.stringify({ input_path: inputPath, force }),
+    body: JSON.stringify(payload),
   });
   const body = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error(body.error || `HTTP ${r.status}`);
-  return body; // { cache_key, cache_hit, base_url, manifest }
+  if (!r.ok) {
+    const err = new Error(body.error || body.message || `HTTP ${r.status}`);
+    err.status = r.status;
+    err.payload = body;      // 409 干涉拒绝的结构化数据（R15）
+    throw err;
+  }
+  return body;
 }

@@ -4,8 +4,8 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>CAD Copilot</title>
-    <script type="module" crossorigin src="/app/assets/index-P3LuftE1.js"></script>
-    <link rel="stylesheet" crossorigin href="/app/assets/index-DonLrk6G.css">
+    <script type="module" crossorigin src="/app/assets/index-DHGbcawR.js"></script>
+    <link rel="stylesheet" crossorigin href="/app/assets/index-DVUrtBwb.css">
   </head>
   <body>
     <div id="app">
@@ -20,6 +20,52 @@
         </form>
         <div id="status" class="idle">输入路径并加载</div>
         <div id="tree"></div>
+        <div id="edit-panel" class="hidden">
+          <div class="fp-head">
+            <span id="ep-title">编辑</span>
+            <button id="ep-close" title="关闭">×</button>
+          </div>
+          <div class="ep-body">
+            <div class="ep-row">
+              <label>操作</label>
+              <select id="ep-op">
+                <option value="drill">钻孔</option>
+                <option value="chamfer">倒角</option>
+                <option value="fillet">圆角</option>
+                <option value="scale">缩放</option>
+              </select>
+            </div>
+            <div class="ep-row" id="ep-drill-params">
+              <label>位置 x,y,z</label>
+              <input id="ep-pos" value="0,0,0" />
+              <label>半径 R</label>
+              <input id="ep-radius" type="number" value="1" min="0.01" step="0.1" />
+              <label>深度</label>
+              <input id="ep-depth" type="number" value="4" min="0.01" step="0.5" />
+            </div>
+            <div class="ep-row hidden" id="ep-chamfer-params">
+              <label>距离</label>
+              <input id="ep-distance" type="number" value="0.2" min="0.01" step="0.1" />
+            </div>
+            <div class="ep-row hidden" id="ep-fillet-params">
+              <label>半径</label>
+              <input id="ep-fradius" type="number" value="0.2" min="0.01" step="0.1" />
+            </div>
+            <div class="ep-row hidden" id="ep-scale-params">
+              <label>系数</label>
+              <input id="ep-factor" type="number" value="1.5" min="0.01" step="0.1" />
+            </div>
+            <button id="ep-run">执行修改（干涉守门）</button>
+            <div id="ep-msg" class="hidden"></div>
+          </div>
+        </div>
+        <div id="version-panel" class="hidden">
+          <div class="fp-head">
+            <span>版本历史</span>
+            <button id="vp-refresh" title="刷新">↻</button>
+          </div>
+          <div id="vp-list"></div>
+        </div>
         <div id="feature-panel" class="hidden">
           <div class="fp-head">
             <span id="fp-title">特征</span>

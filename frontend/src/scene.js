@@ -133,7 +133,10 @@ export class AssemblyScene {
 
     for (const [tid, nodes] of byTemplate) {
       const tpl = manifest.templates.find((t) => t.id === tid);
-      const gltf = await loader.loadAsync(`${baseUrl}/${tpl.gltf}`);
+      // 版本视图的 gltf 是绝对路径（/versions/...），基线是相对 cache 的路径
+      const url = tpl.gltf.startsWith('/')
+        ? tpl.gltf : `${baseUrl}/${tpl.gltf}`;
+      const gltf = await loader.loadAsync(url);
       const meshes = [];
       gltf.scene.traverse((o) => { if (o.isMesh) meshes.push(o); });
       const { geometry, material } = this._mergeTemplateMeshes(meshes);

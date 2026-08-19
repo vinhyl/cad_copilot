@@ -38,7 +38,7 @@ def _flatten(node, depth=0):
 # --------------------------------------------------------------------------
 
 def test_manifest_metadata_fields(manifest, assembly_step):
-    assert manifest["schema_version"] == 1            # R7
+    assert manifest["schema_version"] == cad_assembly.SCHEMA_VERSION   # R7
     assert manifest["units"] == "mm"                  # R3
     assert manifest["source_file"] == "pump_head.step"
     assert len(manifest["source_sha256"]) == 64       # R8 cache key
@@ -151,7 +151,7 @@ def test_mcp_parse_assembly_no_outdir(assembly_step, monkeypatch):
                         [os.path.dirname(assembly_step)])
     raw = cad_mcp_server.parse_assembly(assembly_step)
     m = json.loads(raw)
-    assert m["schema_version"] == 1
+    assert m["schema_version"] == cad_assembly.SCHEMA_VERSION
     assert m["root"]["name"] == "PumpHead"
     assert [t["name"] for t in m["templates"]] == ["BasePlate", "M4x8_Bolt"]
     assert "gltf" not in m["templates"][0]   # no out_dir -> no file outputs

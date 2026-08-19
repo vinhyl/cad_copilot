@@ -227,3 +227,81 @@ html, body {
 }
 .fp-name { color: #e6e6ea; }
 .fp-dim { color: #7a7a88; margin-left: auto; font-size: 11px; }
+
+/* ---- 编辑面板 / 版本面板（Phase C） ---- */
+#edit-panel, #version-panel {
+  border-top: 1px solid #2c2c33;
+  display: flex;
+  flex-direction: column;
+  max-height: 42%;
+}
+#edit-panel.hidden, #version-panel.hidden { display: none; }
+
+.ep-body { padding: 0 12px 10px; display: flex; flex-direction: column; gap: 7px; }
+.ep-row { display: flex; align-items: center; gap: 6px; font-size: 12px; }
+.ep-row label { color: #a0a0aa; flex: none; }
+.ep-row input, .ep-row select {
+  flex: 1;
+  min-width: 0;
+  padding: 3px 6px;
+  border: 1px solid #3a3a44;
+  border-radius: 5px;
+  background: #17171a;
+  color: #e6e6ea;
+  font-size: 12px;
+}
+.ep-row input[type="number"] { width: 58px; flex: none; }
+
+#ep-run {
+  padding: 6px 10px;
+  border: none;
+  border-radius: 6px;
+  background: #4b3fe3;
+  color: #fff;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+}
+#ep-run:hover { background: #5a4ff0; }
+
+#ep-msg { font-size: 12px; line-height: 1.5; border-radius: 6px; padding: 7px 9px; }
+#ep-msg.hidden { display: none; }
+.ep-msg-info { color: #a0c8ff; background: #1c2740; }
+.ep-msg-error { color: #ff9d94; background: #3a1f1e; }
+
+#vp-list { overflow: auto; padding: 0 8px 10px; }
+.vp-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 4px 8px;
+  border-radius: 5px;
+  font-size: 12px;
+}
+.vp-row.current { background: #37306e; }
+.vp-name { color: #e6e6ea; font-weight: 500; flex: none; }
+.vp-desc {
+  color: #7a7a88;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.vp-row button {
+  flex: none;
+  padding: 2px 9px;
+  border: 1px solid #3a3a44;
+  border-radius: 5px;
+  background: #26262e;
+  color: #cfcfd8;
+  font-size: 11px;
+  cursor: pointer;
+}
+.vp-row button:disabled { opacity: 0.45; cursor: default; }
+#vp-refresh {
+  border: none;
+  background: none;
+  color: #7a7a88;
+  font-size: 14px;
+  cursor: pointer;
+}

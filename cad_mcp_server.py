@@ -10,6 +10,7 @@ Tools:
   - pick_features      : interactive feature-picking 3D preview (offline HTML + vendor)
   - parse_assembly     : assembly STEP -> tree + 4x4 matrices + dedup part
                          templates (glTF cache for the Web frontend)
+  - check_interference : boolean interference audit of an assembly (all pairs)
   - build123d_model    : run a build123d modeling script (DISABLED by default;
                          requires CAD_MCP_ALLOW_BUILD123D=1 -- local code execution)
 
@@ -291,6 +292,42 @@ def parse_assembly(input_path: str, out_dir: str = "") -> str:
         manifest = cad_assembly.parse_assembly(_safe_path(input_path))
         manifest.pop("_shapes", None)
     return json.dumps(manifest, ensure_ascii=False, indent=2)
+
+
+@mcp.tool()
+def check_interference(input_path: str) -> str:
+    """Audit an assembly STEP for physical interference between ALL part
+    instance pairs (deterministic boolean check -- never estimated).
+
+    For every pair of instances whose world-space bounding boxes overlap, a
+    BRepAlgoAPI_Common boolean is evaluated; pairs with common volume above
+    0.01 mm3 are reported with both part names/ids and the penetration
+    volume. Use this BEFORE accepting a geometry modification: an empty
+    result means the assembly is interference-free.
+
+    Args:
+        input_path: assembly (.step/.stp) -- flat single-solid files are
+                    valid input and always report no interference.
+    Returns: JSON {ok, instance_count, interference_count, interferences:
+    [{a:{id,name}, b:{id,name}, volume_mm3}]}.
+    """
+    import cad_assembly  # lazy
+    manifest = cad_assembly.parse_assembly(_safe_path(input_path))
+    shapes = manifest.pop("_shapes")
+    hits = cad_assembly.check_interference(manifest, shapes)
+    return json.dumps({
+        "ok": True,
+        "instance_count": sum(1 for _ in _iter_parts(manifest["root"])),
+        "interference_count": len(hits),
+        "interferences": hits,
+    }, ensure_ascii=False, indent=2)
+
+
+def _iter_parts(node):
+    if node["type"] == "part":
+        yield node
+    for ch in node.get("children", []):
+        yield from _iter_parts(ch)
 
 
 if __name__ == "__main__":

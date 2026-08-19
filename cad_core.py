@@ -50,7 +50,10 @@ def json_for_script(obj) -> str:
     return s
 
 
-_STDOUT_LOCK = threading.Lock()
+# RLock: re-entrant for the SAME thread -- service-layer handlers already
+# hold this lock when calling into build_cache -> write_shape, which enters
+# the suppression again (self-deadlock with a plain Lock).
+_STDOUT_LOCK = threading.RLock()
 
 
 class _SuppressStdout:

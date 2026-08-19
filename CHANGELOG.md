@@ -5,6 +5,33 @@
 
 ## [未发布]
 
+### 新增 (Added)（Phase C：AI 修改闭环 + 版本管理）
+- **`cad_versions.py` 增量版本仓库（D10）**：v0 基线 + v1..vN 链式增量（每版本只存
+  被改模板的 step/gltf）；**原子提交**（临时目录 + rename，R6）+ manifest 原子写
+  + 启动清理 `.tmp_*`；**回滚 = 指针切换**，历史版本文件永不重写；解析链按版本序
+  取最新模板文件，否则回退基线 `parts/tN.step`。
+- **干涉守门（D8）**：`cad_assembly.check_interference()`——世界矩阵展平实例
+  （节点 matrix 已是世界矩阵，不重复乘父链）→ bbox 预筛 → BRepAlgoAPI_Common
+  逐对布尔，报告穿透体积 mm³；编辑场景只查被改模板实例 vs 其余 + 实例间。
+- **服务层写路径**：`POST /api/assembly/edit`（编辑 → 守门 → 原子提交，409 结构化
+  拒绝含零件对/体积/保持版本，R15）、`GET /api/versions`、`POST /api/versions/checkout`、
+  `/versions/` 静态路由；parse 缓存命中校验 schema_version（R7，旧 schema 自动重建）。
+- **MCP 第 10 个工具 `check_interference`**：全实例对干涉审计（agent 可调的
+  确定性守门）；`build_cache` 新增 `parts/tN.step` B-rep 导出（编辑几何源），
+  SCHEMA_VERSION 1→2。
+- **前端**：编辑面板（钻孔/倒角/圆角/缩放 + 参数表单，干涉拒绝红色结构化消息）
+  + 版本面板（v0..vN 列表、当前标记、一键切换/回滚）+ 版本视图 manifest 切换
+  （模板 gltf 绝对路径指向 `/versions/`）。
+- **修复（测试期发现）**：`_STDOUT_LOCK` 改 RLock——service 层持锁调
+  build_cache→write_shape 时 `_SuppressStdout` 重入自死锁；`cad_service` 缺
+  `import cad_core`；`_world_instances` 对已是世界矩阵的节点矩阵重复乘父链
+  （螺栓 bbox 33→63 双重累积）。
+- **E2E（真实浏览器）验证通过**：v1 提交（螺栓钻孔，三角形 176→304 真实变化）；
+  scale×2.5 触发 2 处干涉拒绝（94.248 mm³×2，版本不前移）；v0/v1 往返切换
+  几何正确还原。
+- **测试**：新增 `tests/test_cad_edit_flow.py`（10 用例：版本链/回滚指针/临时清理/
+  干涉检出与放行/编辑流/坏参数/未知 id/schema 失效重建），全量 **102/102**。
+
 ### 新增 (Added)（Phase B）
 - **多层级爆炸图（ADR-0002 D3 / 模块二）**：`cad_assembly.parse_assembly` 为每个
   非根节点计算**相对 explode 向量**（子树质心 − 父质心方向，同心兜底沿父包围盒

@@ -1,7 +1,10 @@
 import './style.css';
 import { AssemblyScene } from './scene.js';
 import { AssemblyTree } from './tree.js';
-import { getToken, setToken, parseAssembly } from './api.js';
+import {
+  getToken, setToken, parseAssembly, editAssembly, listVersions,
+  checkoutVersion,
+} from './api.js';
 
 // ---- token 引导：URL ?token= 一次性注入 localStorage（本地单用户工具约定）----
 const params = new URLSearchParams(location.search);
@@ -34,6 +37,7 @@ function selectNode(id) {
     scene.enableMove(tree.partIdsUnder(id));   // 选装配体 → 整组移动
   }
   updateFeaturePanel();
+  updateEditPanel();
 }
 
 // ---- 工具栏 ----
@@ -179,6 +183,132 @@ function updateFeaturePanel() {
     .catch(() => fp.classList.add('hidden'));
 }
 
+// ---- 编辑面板（Phase C：写操作 → 干涉守门 → 原子版本提交） ----
+const ep = $('#edit-panel');
+const epTitle = $('#ep-title');
+const epOp = $('#ep-op');
+const epMsg = $('#ep-msg');
+const vp = $('#version-panel');
+const vpList = $('#vp-list');
+let editTarget = null;   // {templateId, partName}
+
+$('#ep-close').addEventListener('click', () => ep.classList.add('hidden'));
+$('#vp-refresh').addEventListener('click', refreshVersions);
+
+epOp.addEventListener('change', () => {
+  $('#ep-drill-params').classList.toggle('hidden', epOp.value !== 'drill');
+  $('#ep-chamfer-params').classList.toggle('hidden', epOp.value !== 'chamfer');
+  $('#ep-fillet-params').classList.toggle('hidden', epOp.value !== 'fillet');
+  $('#ep-scale-params').classList.toggle('hidden', epOp.value !== 'scale');
+});
+
+function updateEditPanel() {
+  const rec = selectedId && tree.nodes.get(selectedId);
+  if (!rec || rec.node.type !== 'part' || !lastManifest) {
+    editTarget = null;
+    ep.classList.add('hidden');
+    return;
+  }
+  const tid = scene.templateOf(selectedId);
+  editTarget = { templateId: tid, partName: rec.node.name };
+  epTitle.textContent = `编辑 ${rec.node.name}（模板 ${tid}）`;
+  ep.classList.remove('hidden');
+}
+
+function editParams() {
+  switch (epOp.value) {
+    case 'drill': {
+      const pos = $('#ep-pos').value.split(',').map((x) => parseFloat(x.trim()));
+      return {
+        radius: parseFloat($('#ep-radius').value),
+        depth: parseFloat($('#ep-depth').value),
+        position: pos.length === 3 ? pos : [0, 0, 0],
+      };
+    }
+    case 'chamfer':
+      return { distance: parseFloat($('#ep-distance').value) };
+    case 'fillet':
+      return { radius: parseFloat($('#ep-fradius').value) };
+    case 'scale':
+      return { factor: parseFloat($('#ep-factor').value) };
+    default:
+      return {};
+  }
+}
+
+$('#ep-run').addEventListener('click', async () => {
+  if (!editTarget || !lastCacheKey) return;
+  epMsg.className = 'ep-msg-info';
+  epMsg.textContent = '修改中（几何 + 干涉检查）…';
+  epMsg.classList.remove('hidden');
+  try {
+    const res = await editAssembly(
+      lastCacheKey, editTarget.templateId, epOp.value, editParams());
+    // 用版本视图 manifest 重载场景（编辑模板 gltf 指向版本文件）
+    lastManifest = res.manifest;
+    await scene.load(res.manifest, lastBaseUrl);
+    tree.render(res.manifest.root);
+    scene.highlight(null);
+    selectedId = null;
+    ep.classList.add('hidden');
+    epMsg.classList.add('hidden');
+    status(`已提交 ${res.version}：${res.changelog}`);
+    refreshVersions();
+  } catch (err) {
+    // R15: 结构化拒绝（干涉）显式呈现
+    if (err.status === 409 && err.payload?.interferences) {
+      const rows = err.payload.interferences
+        .map((h) => `${h.a.name} ↔ ${h.b.name}（${h.volume_mm3} mm³）`).join('；');
+      epMsg.className = 'ep-msg-error';
+      epMsg.textContent = `⛔ 干涉守门拒绝：${rows}。几何保持 ${err.payload.version} 不变。`;
+    } else {
+      epMsg.className = 'ep-msg-error';
+      epMsg.textContent = `错误：${err.message}`;
+    }
+    epMsg.classList.remove('hidden');
+  }
+});
+
+// ---- 版本面板 ----
+async function refreshVersions() {
+  if (!lastCacheKey) return;
+  try {
+    const res = await listVersions(lastCacheKey);
+    vp.classList.remove('hidden');
+    vpList.innerHTML = '';
+    const mkRow = (id, changelog, created, current) => {
+      const row = document.createElement('div');
+      row.className = `vp-row${current ? ' current' : ''}`;
+      const name = document.createElement('span');
+      name.className = 'vp-name';
+      name.textContent = `${id}`;
+      const desc = document.createElement('span');
+      desc.className = 'vp-desc';
+      desc.textContent = changelog + (created ? ` · ${created}` : '');
+      const btn = document.createElement('button');
+      btn.textContent = current ? '当前' : '切换';
+      btn.disabled = current;
+      btn.addEventListener('click', async () => {
+        const r = await checkoutVersion(lastCacheKey, id);
+        lastManifest = r.manifest;
+        await scene.load(r.manifest, lastBaseUrl);
+        tree.render(r.manifest.root);
+        scene.highlight(null);
+        selectedId = null;
+        status(`已切换到 ${id}`);
+        refreshVersions();
+      });
+      row.append(name, desc, btn);
+      vpList.appendChild(row);
+    };
+    mkRow('v0', '基线（原始导入）', '', res.current === 'v0');
+    [...res.versions].reverse().forEach((v) =>
+      mkRow(v.id, v.changelog, v.created, v.id === res.current));
+  } catch {
+    vp.classList.add('hidden');
+  }
+}
+
 // ---- 加载表单 ----
 const form = $('#load-form');
 const pathInput = $('#path-input');
@@ -193,6 +323,7 @@ function status(text, isError = false) {
 
 let lastManifest = null;
 let lastBaseUrl = null;
+let lastCacheKey = null;
 
 form.addEventListener('submit', async (e) => {
   e.preventDefault();
@@ -204,11 +335,13 @@ form.addEventListener('submit', async (e) => {
     const res = await parseAssembly(p, forceBox.checked);
     lastManifest = res.manifest;
     lastBaseUrl = res.base_url;
+    lastCacheKey = res.cache_key;
     const count = await scene.load(res.manifest, res.base_url);
     tree.render(res.manifest.root);
     scene.highlight(null);
     selectedId = null;
     fp.classList.add('hidden');
+    ep.classList.add('hidden');
     explodeSlider.value = 0;
     explodeVal.textContent = '0%';
     scene.applyExplosion(0);
@@ -217,6 +350,7 @@ form.addEventListener('submit', async (e) => {
       `${res.manifest.source_file} · ${res.manifest.templates.length} 模板 · ` +
       `${count} 实例 · ${res.cache_hit ? '缓存命中' : '新建缓存'}`,
     );
+    refreshVersions();
   } catch (err) {
     status(`错误：${err.message}`, true);
   } finally {

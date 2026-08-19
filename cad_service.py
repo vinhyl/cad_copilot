@@ -42,6 +42,7 @@ from starlette.responses import FileResponse, JSONResponse
 from starlette.routing import Route, WebSocketRoute
 
 import cad_assembly
+import cad_core
 from cad_core import _SuppressStdout
 
 DEFAULT_HOST = "127.0.0.1"
@@ -112,6 +113,16 @@ def create_app(token: str | None = None,
             raise PermissionError("cache path escape")
         return rp
 
+    versions_root = os.path.join(workspace, "versions")
+    os.makedirs(versions_root, exist_ok=True)
+
+    def safe_versions_path(rest: str) -> str:
+        """Resolve a /versions/<rest> URL path inside versions_root."""
+        rp = os.path.realpath(os.path.join(versions_root, rest))
+        if not (rp == versions_root or rp.startswith(versions_root + os.sep)):
+            raise PermissionError("versions path escape")
+        return rp
+
     def check_auth(request) -> None:
         supplied = (request.headers.get("authorization", "")
                     .removeprefix("Bearer ").strip()
@@ -145,9 +156,13 @@ def create_app(token: str | None = None,
 
         if not force and os.path.isfile(tree_json):
             # R8/R17: same source content -> reuse existing cache node.
+            # R7: a manifest written by an older schema (e.g. v1 without
+            # parts/*.step) must be rebuilt, not reused.
             manifest = cad_assembly.load_cache(cache_dir)
-            return JSONResponse({"cache_key": key, "cache_hit": True,
-                                 "base_url": f"/cache/{key}", "manifest": manifest})
+            if manifest.get("schema_version") == cad_assembly.SCHEMA_VERSION:
+                return JSONResponse({"cache_key": key, "cache_hit": True,
+                                     "base_url": f"/cache/{key}",
+                                     "manifest": manifest})
 
         try:
             with _GEOMETRY_LOCK, _SuppressStdout():
@@ -160,6 +175,172 @@ def create_app(token: str | None = None,
     async def cache_file(request):
         try:
             fp = safe_cache_path(request.path_params["rest"])
+        except PermissionError:
+            return JSONResponse({"error": "forbidden"}, status_code=403)
+        if not os.path.isfile(fp):
+            return JSONResponse({"error": "not found"}, status_code=404)
+        return FileResponse(fp)
+
+    # ----------------------------------------------------------------------
+    # Phase C: edit (interference-gated) + version management (D10)
+    # ----------------------------------------------------------------------
+
+    def _store(cache_key: str):
+        import cad_versions
+        store = cad_versions.VersionStore(versions_root, cache_key)
+        store.cleanup_temp()   # R6: clear crashed-commit leftovers
+        return store
+
+    def _view_manifest(cache_key: str) -> dict:
+        """Baseline manifest with version-resolved template gltf paths.
+
+        Template gltf becomes an absolute /versions/... URL when a version
+        modified it; otherwise the baseline cache-relative path stays.
+        """
+        manifest = cad_assembly.load_cache(os.path.join(cache_root, cache_key))
+        store = _store(cache_key)
+        for t in manifest["templates"]:
+            vurl = store.resolve_gltf(t["id"])
+            if vurl:
+                t["gltf"] = vurl
+        return manifest
+
+    def _edit_context(cache_key: str):
+        cache_dir = os.path.join(cache_root, cache_key)
+        if not os.path.isfile(os.path.join(cache_dir, "tree_structure.json")):
+            raise KeyError(f"unknown cache_key: {cache_key}")
+        manifest = cad_assembly.load_cache(cache_dir)
+        return cache_dir, manifest
+
+    async def edit(request):
+        """POST /api/assembly/edit -- the write path (③ 类流程):
+        apply template edit -> interference gate -> atomic version commit.
+        Nothing is committed when the gate rejects (R15: structured error)."""
+        try:
+            check_auth(request)
+            body = json.loads(await request.body() or b"{}")
+            cache_key = str(body["cache_key"])
+            tid = str(body["template_id"])
+            operation = str(body["operation"])
+            params = body.get("params") or {}
+        except PermissionError as e:
+            return JSONResponse({"error": str(e)}, status_code=401
+                                if "token" in str(e) else 403)
+        except (KeyError, ValueError, TypeError) as e:
+            return JSONResponse({"error": f"bad request: {e}"}, status_code=400)
+
+        try:
+            cache_dir, manifest = _edit_context(cache_key)
+        except KeyError as e:
+            return JSONResponse({"error": str(e)}, status_code=404)
+
+        tpl = next((t for t in manifest["templates"] if t["id"] == tid), None)
+        if tpl is None:
+            return JSONResponse(
+                {"error": f"unknown template_id: {tid}"}, status_code=400)
+
+        store = _store(cache_key)
+        tmp_dir = os.path.join(versions_root, cache_key, "_prep")
+        try:
+            with _GEOMETRY_LOCK, _SuppressStdout():
+                # resolve the CURRENT geometry of this template (version
+                # chain first, baseline cache second)
+                step_path = store.resolve_step(
+                    tid, baseline_step=os.path.join(cache_dir, "parts", f"{tid}.step"))
+                shape = cad_core.read_shape(step_path)
+                new_shape = cad_assembly.apply_template_edit(shape, operation, params)
+
+                # interference gate: edited template instances vs the rest
+                all_shapes = cad_assembly.template_shapes_from_cache(cache_dir, manifest)
+                all_shapes[tid] = new_shape
+                hits = cad_assembly.check_interference(
+                    manifest, all_shapes, edited_template=tid, edited_shape=new_shape)
+                if hits:
+                    # R15: structured rejection, nothing committed
+                    return JSONResponse({
+                        "ok": False, "error": "interference",
+                        "stage": "interference_gate",
+                        "interferences": hits,
+                        "message": f"修改会导致 {len(hits)} 处物理干涉，已拒绝提交；"
+                                   f"几何保持 {store.current} 不变。",
+                        "version": store.current,
+                    }, status_code=409)
+
+                # prepare new version files in a temp dir (R6), then commit
+                os.makedirs(tmp_dir, exist_ok=True)
+                step_out = os.path.join(tmp_dir, f"{tid}.step")
+                gltf_out = os.path.join(tmp_dir, f"{tid}.gltf")
+                cad_core.write_shape(new_shape, step_out, overwrite=True)
+                cad_assembly._export_template_gltf(
+                    new_shape, tpl["name"], tpl.get("color"), gltf_out)
+                changelog = (f"{tpl['name']}: {operation} "
+                             + ", ".join(f"{k}={v}" for k, v in params.items()))
+                record = store.commit(
+                    {tid: {"step": step_out, "gltf": gltf_out}},
+                    changelog=changelog, prepared_dir=tmp_dir)
+        except ValueError as e:
+            return JSONResponse({"ok": False, "error": str(e),
+                                 "stage": "validation"}, status_code=400)
+        except Exception as e:  # noqa: BLE001
+            return JSONResponse({"ok": False, "error": str(e),
+                                 "stage": "internal"}, status_code=422)
+        finally:
+            import shutil as _shutil
+            _shutil.rmtree(tmp_dir, ignore_errors=True)
+
+        return JSONResponse({
+            "ok": True, "version": record["id"], "changelog": changelog,
+            "parent": record["parent"],
+            "manifest": _view_manifest(cache_key),
+        })
+
+    async def versions_list(request):
+        try:
+            check_auth(request)
+            cache_key = str(request.query_params["cache_key"])
+        except PermissionError as e:
+            return JSONResponse({"error": str(e)}, status_code=401
+                                if "token" in str(e) else 403)
+        except KeyError as e:
+            return JSONResponse({"error": f"bad request: {e}"}, status_code=400)
+        try:
+            _edit_context(cache_key)
+            store = _store(cache_key)
+        except KeyError as e:
+            return JSONResponse({"error": str(e)}, status_code=404)
+        m = store.manifest
+        return JSONResponse({"cache_key": cache_key, "current": m["current"],
+                             "versions": [{"id": v["id"], "parent": v["parent"],
+                                           "created": v["created"],
+                                           "changelog": v["changelog"],
+                                           "changes": v["changes"]}
+                                          for v in m["versions"]]})
+
+    async def versions_checkout(request):
+        """POST /api/versions/checkout -- pointer rollback (files never
+        rewritten, D10)."""
+        try:
+            check_auth(request)
+            body = json.loads(await request.body() or b"{}")
+            cache_key = str(body["cache_key"])
+            vid = str(body["version"])
+        except PermissionError as e:
+            return JSONResponse({"error": str(e)}, status_code=401
+                                if "token" in str(e) else 403)
+        except (KeyError, ValueError) as e:
+            return JSONResponse({"error": f"bad request: {e}"}, status_code=400)
+        try:
+            _edit_context(cache_key)
+            store = _store(cache_key)
+            store.checkout(vid)
+        except KeyError as e:
+            return JSONResponse({"error": str(e)}, status_code=404)
+        return JSONResponse({"ok": True, "current": vid,
+                             "manifest": _view_manifest(cache_key)})
+
+    async def versions_file(request):
+        try:
+            fp = safe_versions_path(request.path_params["rest"])
         except PermissionError:
             return JSONResponse({"error": "forbidden"}, status_code=403)
         if not os.path.isfile(fp):
@@ -232,7 +413,11 @@ def create_app(token: str | None = None,
     app = Starlette(routes=[
         Route("/health", health, methods=["GET"]),
         Route("/api/assembly/parse", parse, methods=["POST"]),
+        Route("/api/assembly/edit", edit, methods=["POST"]),
+        Route("/api/versions", versions_list, methods=["GET"]),
+        Route("/api/versions/checkout", versions_checkout, methods=["POST"]),
         Route("/cache/{rest:path}", cache_file, methods=["GET"]),
+        Route("/versions/{rest:path}", versions_file, methods=["GET"]),
         Route("/app", app_static, methods=["GET"]),
         Route("/app/{rest:path}", app_static, methods=["GET"]),
         WebSocketRoute("/ws", ws),

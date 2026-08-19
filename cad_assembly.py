@@ -54,7 +54,9 @@ import hashlib
 import json
 import os
 
-SCHEMA_VERSION = 1
+import cad_core
+
+SCHEMA_VERSION = 2   # v2: + explode vectors, + parts/*.step, + features/*
 
 
 # --------------------------------------------------------------------------
@@ -490,11 +492,17 @@ def build_cache(input_path: str, out_dir: str) -> dict:
 
     lib = os.path.join(out_dir, "gltf_library")
     os.makedirs(lib, exist_ok=True)
+    parts_dir = os.path.join(out_dir, "parts")
+    os.makedirs(parts_dir, exist_ok=True)
     feats_dir = os.path.join(out_dir, "features")
     for t in manifest["templates"]:
         gltf = os.path.join(lib, f"{t['id']}.gltf")
         _export_template_gltf(shapes[t["id"]], t["name"], t["color"], gltf)
         t["gltf"] = f"gltf_library/{t['id']}.gltf"
+        # B-rep export for Phase C edits (D10: 版本管理需要可编辑几何)
+        cad_core.write_shape(shapes[t["id"]],
+                             os.path.join(parts_dir, f"{t['id']}.step"),
+                             overwrite=True)
         try:
             t["features"] = _build_template_features(
                 shapes[t["id"]], feats_dir, t["id"])
@@ -514,3 +522,180 @@ def load_cache(out_dir: str) -> dict:
         raise FileNotFoundError(f"No assembly cache in: {out_dir}")
     with open(tree_path, "r", encoding="utf-8") as f:
         return json.load(f)
+
+
+# --------------------------------------------------------------------------
+# Phase C: template edits + interference gate (D8 / D10)
+# --------------------------------------------------------------------------
+
+def apply_template_edit(shape, operation: str, params: dict):
+    """Dispatch a validated template edit on a B-rep shape (geometry track
+    of D10's dual-track modification; metadata track is a later increment).
+
+    operation:
+      - drill  : cylindrical hole; params radius, depth, position [x,y,z],
+                 direction [x,y,z] (template-LOCAL coordinates)
+      - fillet : round ALL edges; params radius
+      - chamfer: bevel ALL edges; params distance
+      - scale  : uniform scale about origin; params factor
+
+    NOTE: fillet/chamfer/scale remain whole-template operations (R1: OCCT
+    has no persistent topology naming); targeted feature edits are the
+    Phase C follow-up on top of feature ids.
+    """
+    op = (operation or "").lower()
+    if op == "drill":
+        radius = float(params.get("radius", 0))
+        depth = float(params.get("depth", 0))
+        if radius <= 0 or depth <= 0:
+            raise ValueError("drill needs radius > 0 and depth > 0")
+        pos = [float(x) for x in params.get("position", [0, 0, 0])]
+        d = [float(x) for x in params.get("direction", [0, 0, 1])]
+        return cad_core.drill_hole(shape, pos, d, radius, depth)
+    if op == "fillet":
+        radius = float(params.get("radius", 0))
+        if radius <= 0:
+            raise ValueError("fillet needs radius > 0")
+        return cad_core.fillet(shape, radius)
+    if op == "chamfer":
+        distance = float(params.get("distance", 0))
+        if distance <= 0:
+            raise ValueError("chamfer needs distance > 0")
+        return cad_core.chamfer(shape, distance)
+    if op == "scale":
+        factor = float(params.get("factor", 0))
+        if factor <= 0:
+            raise ValueError("scale needs factor > 0")
+        return cad_core.scale_shape(shape, factor)
+    raise ValueError("operation must be drill|fillet|chamfer|scale")
+
+
+def _world_instances(manifest: dict, template_shapes: dict) -> list:
+    """Flatten the tree into part instances with world matrices + shapes.
+
+    NOTE: manifest node matrices are ALREADY accumulated world transforms
+    (parse_assembly walks the parent chain); do not multiply the parent in
+    again.
+    """
+    out = []
+
+    def walk(node):
+        from OCP.gp import gp_Trsf
+        m = node.get("matrix")
+        t = gp_Trsf()
+        if m:
+            t.SetValues(m[0][0], m[0][1], m[0][2], m[0][3],
+                        m[1][0], m[1][1], m[1][2], m[1][3],
+                        m[2][0], m[2][1], m[2][2], m[2][3])
+        if node["type"] == "part":
+            shp = template_shapes.get(node["template"])
+            if shp is not None:
+                out.append({"id": node["id"], "name": node["name"],
+                            "template": node["template"], "shape": shp,
+                            "trsf": t})
+        for ch in node.get("children", []):
+            walk(ch)
+
+    walk(manifest["root"])
+    return out
+
+
+def check_interference(manifest: dict, template_shapes: dict,
+                       edited_template: str | None = None,
+                       edited_shape=None, tolerance: float = 0.01) -> list:
+    """Boolean interference gate (D8: deterministic check, AI never guesses).
+
+    When edited_template is None: checks ALL instance pairs (static audit).
+    Otherwise: checks the edited template's instances (using edited_shape)
+    against every other instance, and edited instances against each other.
+
+    Returns a list of {a, b, volume_mm3} for each interfering pair
+    (common volume > tolerance). Empty list = no interference.
+    Bbox prefilter keeps the O(n²) boolean count near zero for sparse
+    assemblies.
+    """
+    from OCP.TopLoc import TopLoc_Location
+    from OCP.BRepAlgoAPI import BRepAlgoAPI_Common
+    from OCP.BRepBndLib import BRepBndLib
+    from OCP.Bnd import Bnd_Box
+    from OCP.GProp import GProp_GProps
+    from OCP.BRepGProp import BRepGProp
+
+    def world_bbox(shape, trsf):
+        moved = shape.Moved(TopLoc_Location(trsf))
+        box = Bnd_Box()
+        box.SetGap(0.0)
+        BRepBndLib.Add_s(moved, box)
+        try:
+            return box.Get()
+        except TypeError:
+            pmin, pmax = box.Get()
+            return (pmin.X(), pmin.Y(), pmin.Z(), pmax.X(), pmax.Y(), pmax.Z())
+
+    def world_shape(shape, trsf):
+        return shape.Moved(TopLoc_Location(trsf))
+
+    def volume_of(shape):
+        p = GProp_GProps()
+        BRepGProp.VolumeProperties_s(shape, p)
+        return p.Mass()
+
+    insts = _world_instances(manifest, template_shapes)
+    # substitute edited shape for the edited template's instances
+    if edited_template is not None:
+        for i in insts:
+            if i["template"] == edited_template:
+                i["shape"] = edited_shape
+                i["edited"] = True
+
+    # candidate pairs
+    pairs = []
+    if edited_template is None:
+        pairs = [(i, j) for k, i in enumerate(insts)
+                 for j in insts[k + 1:]]
+    else:
+        edited = [i for i in insts if i.get("edited")]
+        others = [i for i in insts if not i.get("edited")]
+        pairs = [(i, j) for i in edited for j in others]
+        pairs += [(edited[k], j) for k in range(len(edited))
+                  for j in edited[k + 1:]]
+
+    # cache world bboxes for prefilter
+    bboxes = {}
+
+    def bbox_of(i):
+        if i["id"] not in bboxes:
+            bboxes[i["id"]] = world_bbox(i["shape"], i["trsf"])
+        return bboxes[i["id"]]
+
+    def overlap(a, b):
+        return (a[0] < b[3] and b[0] < a[3] and
+                a[1] < b[4] and b[1] < a[4] and
+                a[2] < b[5] and b[2] < a[5])
+
+    hits = []
+    for i, j in pairs:
+        bi, bj = bbox_of(i), bbox_of(j)
+        if not overlap(bi, bj):
+            continue
+        common = BRepAlgoAPI_Common(world_shape(i["shape"], i["trsf"]),
+                                    world_shape(j["shape"], j["trsf"]))
+        common.Build()
+        if not common.IsDone():
+            continue
+        v = volume_of(common.Shape())
+        if v > tolerance:
+            hits.append({"a": {"id": i["id"], "name": i["name"]},
+                         "b": {"id": j["id"], "name": j["name"]},
+                         "volume_mm3": round(v, 3)})
+    return hits
+
+
+def template_shapes_from_cache(cache_dir: str, manifest: dict) -> dict:
+    """Load B-rep shapes for every template from cache parts/tN.step."""
+    shapes = {}
+    for t in manifest["templates"]:
+        p = os.path.join(cache_dir, "parts", f"{t['id']}.step")
+        if os.path.isfile(p):
+            shapes[t["id"]] = cad_core.read_shape(p)
+    return shapes
