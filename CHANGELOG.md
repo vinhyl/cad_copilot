@@ -10,8 +10,12 @@
   文件标记为 `-binary`，禁止 `core.autocrlf`/`eol` 把 `.js` 转换成 CRLF（否则
   SHA-256 不匹配、离线预览拒绝运行）。已确认仓库内 blob 已为 LF 存储，无需重新入库。
 - **`tests/test_feature_picker_stl.py` 在 `pytest tests/`（目录调用）下 `ModuleNotFoundError: _compare_helpers`**：
-  `tests/conftest.py` 现在把 `tests/` 自身加入 `sys.path`，使兄弟 helper 模块在任意
-  pytest 调用形态（单文件 / 目录 / 跨 runner 版本差异）下都可导入。
+  根因是 CI 使用 `--cov`（pytest-cov 激活）的目录调用，此时 `tests/` 自身不一定在
+  `sys.path` 上，`conftest.py` 注入 `TESTS_DIR` 在 coverage 插件时序下并不可靠（已推送
+  `be630ef` 仍三平台复现）。**最终修复**在测试模块顶部直接
+  `sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))`，使该导入不再依赖
+  conftest 加载顺序或 coverage 插件时序，跨 runner / 版本差异稳定可导入。
+  本条目覆盖 `be630ef` 之后追加的模块级修正。
 
 ## [v0.1.0] — 2026-08-16
 

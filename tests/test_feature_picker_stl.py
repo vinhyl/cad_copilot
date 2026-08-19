@@ -10,6 +10,13 @@ from __future__ import annotations
 
 import os
 import struct
+import sys
+
+# Make sibling helper modules importable regardless of how pytest assembles
+# sys.path (import mode, pytest-cov active, or runner/version differences).
+# Conftest injects the same dir, but we do it here too so the import never
+# depends on conftest load order or coverage-plugin sys.path timing.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import cad_core
 from _compare_helpers import count_binary_stl_triangles
