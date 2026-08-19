@@ -5,6 +5,19 @@
 
 ## [未发布]
 
+### 新增 (Added)
+- **`cad_assembly.py`（Phase A 生产模块，ADR-0002 D3）**：装配体 STEP →
+  Template+Matrix manifest——命名装配树（含累积世界 4×4 矩阵）+ 按 ReferredShape
+  去重的零件模板表；`build_cache()` 写出前端缓存布局（`tree_structure.json` +
+  `gltf_library/`，每唯一模板一份 glTF，天然规避 RWGltf 不去重问题）。
+  manifest 携带 `schema_version`（R7）/ `source_sha256`（R8 缓存键）/ `units: mm`
+  （R3）；R2 兜底：平铺单实体 → 单零件树（过滤 OCCT 翻译器垃圾名，回退 Part_N），
+  多根 STEP → 合成根节点。
+- **MCP 新工具 `parse_assembly`（第 9 个）**：暴露上述能力给 agent，
+  docstring 即契约；路径走 `CAD_MCP_ALLOWED_DIRS` 白名单。
+- **`tests/test_cad_assembly.py`（13 用例）**：manifest 结构/矩阵/模板去重/
+  R2 平铺兜底/缓存布局/MCP 契约（含路径逃逸拒绝）。全量 **68/68 通过**。
+
 ### 工程验证 (Engineering)
 - **Phase A 去风险 spike 全部通过**（XCAF + glTF，2026-08-19）：
   - **Spike 1 XCAF 往返 7/7**：STEPCAFControl 写/读 2 层命名装配，

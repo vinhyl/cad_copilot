@@ -8,6 +8,8 @@ Tools:
   - edit_geometry      : fillet / chamfer / scale / drill
   - boolean_parts      : fuse / cut / common of two solids
   - pick_features      : interactive feature-picking 3D preview (offline HTML + vendor)
+  - parse_assembly     : assembly STEP -> tree + 4x4 matrices + dedup part
+                         templates (glTF cache for the Web frontend)
   - build123d_model    : run a build123d modeling script (DISABLED by default;
                          requires CAD_MCP_ALLOW_BUILD123D=1 -- local code execution)
 
@@ -252,6 +254,40 @@ def pick_features(input_path: str, out_dir: str = "") -> str:
     res = feature_picker.make_picker(_safe_path(input_path),
                                      _safe_path(out_dir) if out_dir else None)
     return json.dumps(res, ensure_ascii=False)
+
+
+@mcp.tool()
+def parse_assembly(input_path: str, out_dir: str = "") -> str:
+    """Parse an assembly STEP into a decoupled Template + Matrix manifest.
+
+    Returns JSON with: the assembly tree (named nodes, each carrying its
+    accumulated world 4x4 matrix), and a deduplicated part-template list --
+    every unique part appears once (same-spec instances share one template),
+    with per-template glTF geometry for the Web frontend.
+
+    A flat single-solid STEP is handled too (becomes a one-part tree with a
+    fallback name); a multi-root STEP gets a synthetic root named after the
+    file. All matrices are in millimetres.
+
+    When out_dir is given, also writes the frontend cache layout:
+      out_dir/tree_structure.json     (the manifest itself)
+      out_dir/gltf_library/tN.gltf/.bin (one glTF per unique part template)
+    Existing cache files are overwritten (cache semantics; the manifest
+    carries the source SHA-256 as its cache key).
+
+    Args:
+        input_path: source assembly (.step/.stp)
+        out_dir: optional cache output folder; defaults to no file output
+    Returns: JSON manifest string (tree + templates + metadata).
+    """
+    import cad_assembly  # lazy: only loaded when this tool is actually called
+    if out_dir:
+        manifest = cad_assembly.build_cache(
+            _safe_path(input_path), _safe_path(out_dir))
+    else:
+        manifest = cad_assembly.parse_assembly(_safe_path(input_path))
+        manifest.pop("_shapes", None)
+    return json.dumps(manifest, ensure_ascii=False, indent=2)
 
 
 if __name__ == "__main__":

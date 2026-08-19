@@ -31,7 +31,7 @@ venv/bin/python        feature_picker.py your_model.step --out-dir previews   # 
 ## MCP Server 使用
 
 `cad_mcp_server.py` 是一个基于 FastMCP 的 stdio MCP server，把上面的几何能力暴露给
-WorkBuddy 等 agent 调用。它当前提供 **8 个工具**（详见下表），其中 `build123d_model`
+WorkBuddy 等 agent 调用。它当前提供 **9 个工具**（详见下表），其中 `build123d_model`
 出于安全考虑**默认禁用**。
 
 ### 启动（stdio）
@@ -66,11 +66,12 @@ venv/bin/python        cad_mcp_server.py    # macOS / Linux
 | `edit_geometry` | 几何编辑：fillet / chamfer / scale / drill | ✅ 启用 |
 | `boolean_parts` | 布尔运算：fuse / cut / common | ✅ 启用 |
 | `pick_features` | 生成可点击的 3D 特征拾取预览（离线 HTML + vendor） | ✅ 启用 |
+| `parse_assembly` | 装配体 STEP → 装配树 + 4×4 矩阵 + 去重零件模板（glTF 缓存，Web 前端 Template+Matrix 数据源） | ✅ 启用 |
 | `build123d_model` | 运行 build123d 建模脚本（**执行任意代码 = 本地代码执行**） | ⛔ **默认禁用**（设 `CAD_MCP_ALLOW_BUILD123D=1` 才启用） |
 
 > 安全提示：`build123d_model` 会以 MCP server 进程的完整权限执行传入的任意 Python
 > 脚本，等于本地代码执行。它被默认禁用，且每次调用都强制走超时隔离子进程。
-> **切勿**在不可信、共享或多租户环境中启用。其余 7 个工具的路径都被限制在
+> **切勿**在不可信、共享或多租户环境中启用。其余 8 个工具的路径都被限制在
 > `CAD_MCP_ALLOWED_DIRS` 白名单内（默认 `.`，即 server 工作目录）。
 
 > 数据隐私备注：Agent 调用本 server 时，工具返回值（特征元数据 / 物性 / 文件清单 /
@@ -160,13 +161,14 @@ previews/
 
 ## 目录结构
 - `cad_core.py` — OCP 核心（读 STEP/IGES、属性、包围盒、mesh/deflection 单一实现）
+- `cad_assembly.py` — 装配体解析（Phase A）：STEP → Template+Matrix manifest（装配树 / 世界矩阵 / 去重模板 / glTF 缓存布局，ADR-0002 D3）
 - `feature_locator.py` — 曲面枚举 + 分类聚合 + 2D 编号定位图（Feature 模型 + 类型注册表）
 - `feature_picker.py` — 特征级 STL 切片 → 可点击 3D 预览（three.js 本地化 + SHA-256 校验）
 - `make_preview.py` — 实体整体预览
-- `cad_mcp_server.py` — FastMCP server（**8 工具**；`pick_features` 已接入；`build123d_model` 默认禁用）
+- `cad_mcp_server.py` — FastMCP server（**9 工具**；`pick_features` / `parse_assembly` 已接入；`build123d_model` 默认禁用）
 - `cad_build.py` — build123d 字体 import-hook（跨平台无害，修复损坏系统字体导致 import 崩溃）
 - `vendor/` — 本地 three.js（three@0.160.0：`three.module.min.js` + `OrbitControls` + `STLLoader`）；见 [vendor/README.md](vendor/README.md)
-- `tests/` — pytest 测试套件（Phase 3 建立，46 个用例全绿）
+- `tests/` — pytest 测试套件（Phase 3 建立；Phase A 增装配黄金断言，当前 **68 个用例全绿**）
 - `pytest.ini` — pytest 配置（含 `--cov` 覆盖率）
 - `docs/architecture/copilot-vision.md` — Web Copilot 系统设想（原根目录 `设想.txt` 迁入；文首附与 ADR-0002 的差异摘要）
 - `docs/decisions/0001-ocp-vs-freecad-base.md` — ADR-0001：OCP 轻量底座 vs FreeCAD 方案对比（原 `comparison.md`）
