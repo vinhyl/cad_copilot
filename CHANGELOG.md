@@ -9,13 +9,16 @@
 - **vendor 在 Windows CI 误报 tampered**：`.gitattributes` 将 3 个 vendored three.js
   文件标记为 `-binary`，禁止 `core.autocrlf`/`eol` 把 `.js` 转换成 CRLF（否则
   SHA-256 不匹配、离线预览拒绝运行）。已确认仓库内 blob 已为 LF 存储，无需重新入库。
-- **`tests/test_feature_picker_stl.py` 在 `pytest tests/`（目录调用）下 `ModuleNotFoundError: _compare_helpers`**：
-  根因是 CI 使用 `--cov`（pytest-cov 激活）的目录调用，此时 `tests/` 自身不一定在
-  `sys.path` 上，`conftest.py` 注入 `TESTS_DIR` 在 coverage 插件时序下并不可靠（已推送
-  `be630ef` 仍三平台复现）。**最终修复**在测试模块顶部直接
-  `sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))`，使该导入不再依赖
-  conftest 加载顺序或 coverage 插件时序，跨 runner / 版本差异稳定可导入。
-  本条目覆盖 `be630ef` 之后追加的模块级修正。
+- **`tests/test_feature_picker_stl.py` 在 CI 上 `ModuleNotFoundError: _compare_helpers`（三平台全挂）**：
+  **真实根因**——`tests/_compare_helpers.py` 从未被提交进仓库：`.gitignore` 的 `_*`
+  规则把它误当作「dev scratch」忽略了（`git check-ignore` 命中 `.gitignore:20:_*`）。
+  CI 是全新 clone，文件根本不存在，任何 `sys.path` 注入都无法解决。
+  **修复**——`.gitignore` 收窄为 `/_*`（仅忽略根目录下划线前缀的临时文件），
+  并正式提交 `tests/_compare_helpers.py`。
+  **回退误诊**——此前 `conftest.py` 的 `TESTS_DIR` 注入（`be630ef`）与测试模块顶部的
+  `sys.path.insert`（`88ccf3f`）均为误诊产物，已回退为 `2349362` 原状；
+  决定性验证：原始代码 + helper 文件存在 + `pytest tests/ -q`（coverage 生效）
+  = 46 passed。
 
 ## [v0.1.0] — 2026-08-16
 

@@ -16,8 +16,8 @@ previews/
 *.bak
 _frag_tmp.stl
 
-# ---- Dev / diagnostic scratch from dev session (underscore-prefixed) ----
-_*
+# ---- Dev / diagnostic scratch from dev session (root-level, underscore-prefixed) ----
+/_*
 
 # ---- Other scratch (debugging helpers, not shipping) ----
 /comparison.md

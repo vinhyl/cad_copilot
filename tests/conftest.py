@@ -25,13 +25,6 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-# Make sibling helper modules (e.g. ``_compare_helpers``) importable from any
-# test module regardless of how pytest inserts sys.path (single-file vs
-# directory invocation, or pytest-version differences across CI runners).
-TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
-if TESTS_DIR not in sys.path:
-    sys.path.insert(0, TESTS_DIR)
-
 # Pin the MCP server's allowed directory to the repo root so sample files
 # resolve, and so the default "." behaviour does not depend on the cwd.
 os.environ["CAD_MCP_ALLOWED_DIRS"] = REPO_ROOT
