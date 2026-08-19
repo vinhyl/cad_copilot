@@ -48,6 +48,46 @@ instructions:
       - type: dfm
         check: "壁厚不低于 DFM 最小值（如 1mm）"
 
+  # ---- 真实指令（Phase C 开发中验证过的场景，断言机器可执行） ----------
+  - id: "E003"
+    source: team
+    status: verified
+    instruction: "给这根螺栓钻一个 R1 深 4 的通孔"
+    target:
+      part: "M4x8_Bolt"
+      feature: "（新增特征）"
+    golden_trajectory:
+      - tool: parse_assembly
+        args: {}
+      - tool: edit
+        args:
+          template_id: "t1"
+          operation: "drill"
+          params: {radius: 1.0, depth: 4.0, position: [0, 0, 0]}
+    assertions:
+      - type: volume_delta
+        expect_min: 10.0        # pi*1^2*4 ~= 12.57
+        expect_max: 14.0
+
+  - id: "E004"
+    source: team
+    status: verified
+    instruction: "把底板放大到 2.5 倍"
+    target:
+      part: "BasePlate"
+      feature: "（整体缩放）"
+    golden_trajectory:
+      - tool: parse_assembly
+        args: {}
+      - tool: edit
+        args:
+          template_id: "t0"
+          operation: "scale"
+          params: {factor: 2.5}
+    assertions:
+      - type: interference_rejected
+        expect_count: 2         # 与两个螺栓实例都穿透（E2E 实测 94.248 mm3 x2）
+
   # ---- 真实指令收集区（从 draft 开始，随手记原话） --------------------
   # - id: "R001"
   #   source: team

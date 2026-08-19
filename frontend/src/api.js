@@ -12,11 +12,13 @@ export async function parseAssembly(inputPath, force = false) {
   return _post('/api/assembly/parse', { input_path: inputPath, force });
 }
 
-/** Phase C: 编辑（干涉守门 + 原子提交）。409 时抛出带 interferences 的错误。 */
-export async function editAssembly(cacheKey, templateId, operation, params) {
+/** Phase C: 编辑（干涉守门 + 原子提交）。409 时抛出带 interferences 的错误。
+ * featureId 提供时为定点特征编辑（R1），否则整模板编辑。 */
+export async function editAssembly(cacheKey, templateId, operation, params, featureId = null) {
   return _post('/api/assembly/edit', {
     cache_key: cacheKey, template_id: templateId,
     operation, params,
+    ...(featureId != null ? { feature_id: featureId } : {}),
   });
 }
 
@@ -31,6 +33,22 @@ export async function listVersions(cacheKey) {
 
 export async function checkoutVersion(cacheKey, version) {
   return _post('/api/versions/checkout', { cache_key: cacheKey, version });
+}
+
+/** 模块七一键体检：干涉 + DFM。 */
+export async function auditAssembly(cacheKey) {
+  const r = await fetch(
+    `/api/assembly/audit?cache_key=${encodeURIComponent(cacheKey)}`, {
+      headers: { Authorization: `Bearer ${getToken()}` },
+    });
+  const body = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(body.error || `HTTP ${r.status}`);
+  return body;
+}
+
+/** D5 图纸导入：DXF 原生 / DWG 经 ODA → 语义 + SVG 缓存。 */
+export async function importDrawing(inputPath) {
+  return _post('/api/drawing/import', { input_path: inputPath });
 }
 
 async function _post(url, payload) {

@@ -3,7 +3,7 @@ import { AssemblyScene } from './scene.js';
 import { AssemblyTree } from './tree.js';
 import {
   getToken, setToken, parseAssembly, editAssembly, listVersions,
-  checkoutVersion,
+  checkoutVersion, auditAssembly, importDrawing,
 } from './api.js';
 
 // ---- token 引导：URL ?token= 一次性注入 localStorage（本地单用户工具约定）----
@@ -106,6 +106,86 @@ $('#btn-cam-restore').addEventListener('click', () => {
   else status('尚无已保存视角', true);
 });
 
+// ---- 一键体检（模块七：干涉 + DFM） ----
+const auditModal = $('#audit-modal');
+const auditBody = $('#audit-body');
+$('#audit-close').addEventListener('click', () => auditModal.classList.add('hidden'));
+auditModal.addEventListener('click', (e) => {
+  if (e.target === auditModal) auditModal.classList.add('hidden');
+});
+$('#btn-audit').addEventListener('click', async () => {
+  if (!lastCacheKey) { status('先加载装配体', true); return; }
+  status('体检中（干涉 + DFM 规则）…');
+  try {
+    const rep = await auditAssembly(lastCacheKey);
+    const div = (cls, html) => {
+      const el = document.createElement('div');
+      el.className = cls;
+      el.innerHTML = html;
+      return el;
+    };
+    auditBody.innerHTML = '';
+    if (rep.interference_count === 0 && rep.dfm_count === 0) {
+      auditBody.appendChild(div('audit-ok', '✓ 未发现问题：无干涉，DFM 规则全部通过'));
+    } else {
+      if (rep.interference_count > 0) {
+        auditBody.appendChild(div('audit-severity error',
+          `干涉 ×${rep.interference_count}`));
+        rep.interferences.forEach((h) => auditBody.appendChild(
+          div('audit-item', `${h.a.name} ↔ ${h.b.name}：穿透 ${h.volume_mm3} mm³`)));
+      }
+      if (rep.dfm_count > 0) {
+        auditBody.appendChild(div('audit-severity warning', `DFM 提示 ×${rep.dfm_count}`));
+        rep.dfm.forEach((d) => auditBody.appendChild(
+          div('audit-item', `[${d.part}] ${d.detail}`)));
+      }
+    }
+    auditModal.classList.remove('hidden');
+    status(`体检完成：干涉 ${rep.interference_count} · DFM ${rep.dfm_count}`);
+  } catch (err) {
+    status(`体检失败：${err.message}`, true);
+  }
+});
+
+// ---- 图纸对照（D5：DXF/DWG → 语义 + SVG） ----
+const drawingModal = $('#drawing-modal');
+$('#drawing-close').addEventListener('click', () => drawingModal.classList.add('hidden'));
+drawingModal.addEventListener('click', (e) => {
+  if (e.target === drawingModal) drawingModal.classList.add('hidden');
+});
+$('#btn-drawing').addEventListener('click', () => drawingModal.classList.remove('hidden'));
+$('#drawing-load').addEventListener('click', async () => {
+  const p = $('#drawing-path').value.trim();
+  const msg = $('#drawing-msg');
+  if (!p) return;
+  msg.textContent = '导入中…';
+  try {
+    const res = await importDrawing(p);
+    msg.textContent = `${res.source_file}${res.cache_hit ? ' · 缓存命中' : ''} · `
+      + `${res.oda_used ? 'ODA 转换' : 'DXF 直读'} · ${res.entity_count} 实体`;
+    // SVG 直插（同源静态服务）
+    const r = await fetch(`${res.base_url}/view.svg`);
+    $('#drawing-view').innerHTML = await r.text();
+    // 语义列表（螺纹/直径/公差 = 模块六语义真理）
+    const sem = $('#drawing-semantics');
+    sem.innerHTML = '';
+    res.semantics.forEach((s) => {
+      const row = document.createElement('div');
+      row.className = 'fp-row';
+      const kind = document.createElement('span');
+      kind.className = 'sem-kind';
+      kind.textContent = { thread: '螺纹', diameter: '直径', tolerance: '公差', note: '标注' }[s.kind] || s.kind;
+      const val = document.createElement('span');
+      val.className = 'fp-name';
+      val.textContent = s.text;
+      sem.append(row);
+      row.append(kind, val);
+    });
+  } catch (err) {
+    msg.textContent = `错误：${err.message}`;
+  }
+});
+
 $('#btn-view-reset').addEventListener('click', () => {
   scene.applyExplosion(0);
   explodeSlider.value = 0;
@@ -171,6 +251,48 @@ function updateFeaturePanel() {
         dim.textContent = [f.axis, r, f.extent ? `L${f.extent}` : null]
           .filter(Boolean).join(' ');
         row.append(dot, name, dim);
+
+        // 定点特征编辑（R1）：孔类特征支持扩径
+        if (f.type === 'hole' && (f.radii || []).length) {
+          const btn = document.createElement('button');
+          btn.className = 'fp-edit';
+          btn.textContent = '扩径';
+          btn.title = '定点扩径（只改这个孔）';
+          btn.addEventListener('click', async (e) => {
+            e.stopPropagation();
+            const cur = Math.max(...f.radii);
+            const input = window.prompt(`扩径到多大半径？（当前 R${cur}，只能扩大）`, (cur + 0.5).toFixed(2));
+            if (!input) return;
+            const newR = parseFloat(input);
+            if (!(newR > cur)) { window.alert('只能扩大（B-rep 无法回填材料）'); return; }
+            btn.disabled = true;
+            btn.textContent = '…';
+            try {
+              const res = await editAssembly(
+                lastCacheKey, tid, 'hole_resize', { radius: newR }, f.id);
+              lastManifest = res.manifest;
+              await scene.load(res.manifest, lastBaseUrl);
+              tree.render(res.manifest.root);
+              scene.highlight(null);
+              selectedId = null;
+              status(`已提交 ${res.version}：${res.changelog}`);
+              refreshVersions();
+            } catch (err) {
+              if (err.status === 409 && err.payload?.interferences) {
+                const rows = err.payload.interferences
+                  .map((h) => `${h.a.name} ↔ ${h.b.name}（${h.volume_mm3} mm³）`).join('；');
+                window.alert(`⛔ 干涉守门拒绝：${rows}\n几何保持 ${err.payload.version} 不变。`);
+              } else {
+                window.alert(`错误：${err.message}`);
+              }
+            } finally {
+              btn.disabled = false;
+              btn.textContent = '扩径';
+            }
+          });
+          row.appendChild(btn);
+        }
+
         row.addEventListener('click', () => {
           fpList.querySelectorAll('.fp-row').forEach((x) => x.classList.remove('selected'));
           row.classList.add('selected');

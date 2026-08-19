@@ -123,6 +123,15 @@ def create_app(token: str | None = None,
             raise PermissionError("versions path escape")
         return rp
 
+    drawings_root = os.path.join(workspace, "drawings")
+    os.makedirs(drawings_root, exist_ok=True)
+
+    def safe_drawings_path(rest: str) -> str:
+        rp = os.path.realpath(os.path.join(drawings_root, rest))
+        if not (rp == drawings_root or rp.startswith(drawings_root + os.sep)):
+            raise PermissionError("drawings path escape")
+        return rp
+
     def check_auth(request) -> None:
         supplied = (request.headers.get("authorization", "")
                     .removeprefix("Bearer ").strip()
@@ -223,6 +232,7 @@ def create_app(token: str | None = None,
             tid = str(body["template_id"])
             operation = str(body["operation"])
             params = body.get("params") or {}
+            feature_id = body.get("feature_id")   # None = whole-template edit
         except PermissionError as e:
             return JSONResponse({"error": str(e)}, status_code=401
                                 if "token" in str(e) else 403)
@@ -248,7 +258,36 @@ def create_app(token: str | None = None,
                 step_path = store.resolve_step(
                     tid, baseline_step=os.path.join(cache_dir, "parts", f"{tid}.step"))
                 shape = cad_core.read_shape(step_path)
-                new_shape = cad_assembly.apply_template_edit(shape, operation, params)
+
+                if feature_id is not None:
+                    # R1 targeted feature edit: locate the feature's own
+                    # metadata and edit ONLY it
+                    feats_json = os.path.join(cache_dir, "features", f"{tid}.json")
+                    if not os.path.isfile(feats_json):
+                        return JSONResponse(
+                            {"ok": False, "error": f"no feature data for {tid}",
+                             "stage": "validation"}, status_code=400)
+                    with open(feats_json, encoding="utf-8") as f:
+                        feats = json.load(f)
+                    feat = next((x for x in feats if x.get("id") == feature_id), None)
+                    if feat is None:
+                        return JSONResponse(
+                            {"ok": False,
+                             "error": f"unknown feature_id: {feature_id}",
+                             "stage": "validation"}, status_code=400)
+                    old_r = max(feat.get("radii") or [0])
+                    new_shape = cad_assembly.apply_feature_edit(
+                        shape, feat, operation, params)
+                    feature_desc = f"{feat.get('label')} {feature_id}"
+                    if operation == "hole_resize":
+                        changelog = (f"{tpl['name']} {feature_desc}: "
+                                     f"R{old_r} -> R{params.get('radius')}")
+                    else:
+                        changelog = (f"{tpl['name']} {feature_desc}: {operation}")
+                else:
+                    new_shape = cad_assembly.apply_template_edit(shape, operation, params)
+                    changelog = (f"{tpl['name']}: {operation} "
+                                 + ", ".join(f"{k}={v}" for k, v in params.items()))
 
                 # interference gate: edited template instances vs the rest
                 all_shapes = cad_assembly.template_shapes_from_cache(cache_dir, manifest)
@@ -273,11 +312,16 @@ def create_app(token: str | None = None,
                 cad_core.write_shape(new_shape, step_out, overwrite=True)
                 cad_assembly._export_template_gltf(
                     new_shape, tpl["name"], tpl.get("color"), gltf_out)
-                changelog = (f"{tpl['name']}: {operation} "
-                             + ", ".join(f"{k}={v}" for k, v in params.items()))
                 record = store.commit(
                     {tid: {"step": step_out, "gltf": gltf_out}},
                     changelog=changelog, prepared_dir=tmp_dir)
+
+                # refresh the edited template's feature cache with STABLE
+                # ids (R1 fingerprint matching) so feature panels survive edits
+                try:
+                    cad_assembly.refresh_template_features(new_shape, cache_dir, tid)
+                except Exception:  # noqa: BLE001 -- feature refresh best-effort
+                    pass
         except ValueError as e:
             return JSONResponse({"ok": False, "error": str(e),
                                  "stage": "validation"}, status_code=400)
@@ -337,6 +381,77 @@ def create_app(token: str | None = None,
             return JSONResponse({"error": str(e)}, status_code=404)
         return JSONResponse({"ok": True, "current": vid,
                              "manifest": _view_manifest(cache_key)})
+
+    async def audit(request):
+        """GET /api/assembly/audit -- 一键体检（模块七）：干涉 + DFM。"""
+        try:
+            check_auth(request)
+            cache_key = str(request.query_params["cache_key"])
+        except PermissionError as e:
+            return JSONResponse({"error": str(e)}, status_code=401
+                                if "token" in str(e) else 403)
+        except KeyError as e:
+            return JSONResponse({"error": f"bad request: {e}"}, status_code=400)
+        try:
+            cache_dir, manifest = _edit_context(cache_key)
+        except KeyError as e:
+            return JSONResponse({"error": str(e)}, status_code=404)
+        try:
+            with _GEOMETRY_LOCK, _SuppressStdout():
+                report = cad_assembly.audit_assembly(cache_dir, manifest)
+        except Exception as e:  # noqa: BLE001
+            return JSONResponse({"error": str(e)}, status_code=422)
+        report["cache_key"] = cache_key
+        return JSONResponse(report)
+
+    async def drawing_import(request):
+        """POST /api/drawing/import -- D5: DXF native / DWG via ODA ->
+        semantics + SVG cache (模块六 语义真理提取)."""
+        try:
+            check_auth(request)
+            body = json.loads(await request.body() or b"{}")
+            src = safe_input_path(str(body["input_path"]))
+        except PermissionError as e:
+            return JSONResponse({"error": str(e)}, status_code=401
+                                if "token" in str(e) else 403)
+        except (KeyError, ValueError) as e:
+            return JSONResponse({"error": f"bad request: {e}"}, status_code=400)
+
+        import hashlib
+        sha = hashlib.sha256()
+        with open(src, "rb") as f:
+            for chunk in iter(lambda: f.read(1 << 16), b""):
+                sha.update(chunk)
+        key = sha.hexdigest()[:16]
+        out_dir = os.path.join(drawings_root, key)
+
+        import cad_drawing
+        cached = os.path.isfile(os.path.join(out_dir, "drawing.json"))
+        if not cached:
+            try:
+                with _GEOMETRY_LOCK, _SuppressStdout():
+                    cad_drawing.import_drawing(src, out_dir)
+            except cad_drawing.DrawingError as e:
+                return JSONResponse({"error": str(e)}, status_code=422)
+            except Exception as e:  # noqa: BLE001
+                return JSONResponse({"error": str(e)}, status_code=422)
+        with open(os.path.join(out_dir, "drawing.json"), encoding="utf-8") as f:
+            result = json.load(f)
+        result["cache_key"] = key
+        result["cache_hit"] = cached
+        result["base_url"] = f"/drawings/{key}"
+        return JSONResponse(result)
+
+    async def drawings_file(request):
+        try:
+            fp = safe_drawings_path(request.path_params["rest"])
+        except PermissionError:
+            return JSONResponse({"error": "forbidden"}, status_code=403)
+        if not os.path.isfile(fp):
+            return JSONResponse({"error": "not found"}, status_code=404)
+        return FileResponse(
+            fp, media_type="image/svg+xml" if fp.endswith(".svg")
+            else "application/json")
 
     async def versions_file(request):
         try:
@@ -414,10 +529,13 @@ def create_app(token: str | None = None,
         Route("/health", health, methods=["GET"]),
         Route("/api/assembly/parse", parse, methods=["POST"]),
         Route("/api/assembly/edit", edit, methods=["POST"]),
+        Route("/api/assembly/audit", audit, methods=["GET"]),
+        Route("/api/drawing/import", drawing_import, methods=["POST"]),
         Route("/api/versions", versions_list, methods=["GET"]),
         Route("/api/versions/checkout", versions_checkout, methods=["POST"]),
         Route("/cache/{rest:path}", cache_file, methods=["GET"]),
         Route("/versions/{rest:path}", versions_file, methods=["GET"]),
+        Route("/drawings/{rest:path}", drawings_file, methods=["GET"]),
         Route("/app", app_static, methods=["GET"]),
         Route("/app/{rest:path}", app_static, methods=["GET"]),
         WebSocketRoute("/ws", ws),

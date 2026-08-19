@@ -31,7 +31,7 @@ venv/bin/python        feature_picker.py your_model.step --out-dir previews   # 
 ## MCP Server 使用
 
 `cad_mcp_server.py` 是一个基于 FastMCP 的 stdio MCP server，把上面的几何能力暴露给
-WorkBuddy 等 agent 调用。它当前提供 **10 个工具**（详见下表），其中 `build123d_model`
+WorkBuddy 等 agent 调用。它当前提供 **11 个工具**（详见下表），其中 `build123d_model`
 出于安全考虑**默认禁用**。
 
 ### 启动（stdio）
@@ -68,11 +68,12 @@ venv/bin/python        cad_mcp_server.py    # macOS / Linux
 | `pick_features` | 生成可点击的 3D 特征拾取预览（离线 HTML + vendor） | ✅ 启用 |
 | `parse_assembly` | 装配体 STEP → 装配树 + 4×4 矩阵 + 去重零件模板（glTF 缓存，Web 前端 Template+Matrix 数据源） | ✅ 启用 |
 | `check_interference` | 装配体全实例对布尔干涉审计（确定性守门，D8） | ✅ 启用 |
+| `audit_assembly` | 一键体检：干涉 + DFM 规则（小孔/深孔/薄壁，模块七） | ✅ 启用 |
 | `build123d_model` | 运行 build123d 建模脚本（**执行任意代码 = 本地代码执行**） | ⛔ **默认禁用**（设 `CAD_MCP_ALLOW_BUILD123D=1` 才启用） |
 
 > 安全提示：`build123d_model` 会以 MCP server 进程的完整权限执行传入的任意 Python
 > 脚本，等于本地代码执行。它被默认禁用，且每次调用都强制走超时隔离子进程。
-> **切勿**在不可信、共享或多租户环境中启用。其余 9 个工具的路径都被限制在
+> **切勿**在不可信、共享或多租户环境中启用。其余 10 个工具的路径都被限制在
 > `CAD_MCP_ALLOWED_DIRS` 白名单内（默认 `.`，即 server 工作目录）。
 
 > 数据隐私备注：Agent 调用本 server 时，工具返回值（特征元数据 / 物性 / 文件清单 /
@@ -128,12 +129,22 @@ SPA：加载装配 STEP → **Template+Matrix 实例化渲染**（每个唯一�
 
 **Phase C 编辑闭环**（选中零件 → 侧栏编辑面板）：
 
-- 操作：钻孔（位置/半径/深度）、倒角、圆角、缩放（R1 现状：整模板操作）
+- 整模板操作：钻孔（位置/半径/深度）、倒角、圆角、缩放
+- **定点特征编辑（R1）**：特征面板的孔特征带「扩径」按钮——只改选中的那个孔
+  （从特征元数据构造定向布尔）；编辑后特征缓存经**指纹匹配**保持 id 稳定
+  （跨版本认出"同一个孔"，changelog 语义化如 `孔 #1.2: R1.0 -> R1.6`）
 - 流程：**编辑 → 干涉守门（BRepAlgoAPI_Common，逐实例布尔 + bbox 预筛）→ 原子版本提交**
   （R6 临时目录 + rename）；干涉时 409 结构化拒绝（涉及零件对 + 穿透体积 mm³），
   几何保持当前版本不变（R15）
 - 版本面板：v0 基线 + v1..vN 链式增量（每版本只存被改模板的 step/gltf），
   切换/回滚 = 指针移动，历史版本文件永不重写（D10）
+
+**一键体检（模块七）**：工具栏「体检」→ 干涉全实例对审计 + DFM 规则
+（小孔 R<0.5 / 深孔 L/D>10 / 平行孔薄壁提示），全部确定性计算（D8）。
+
+**图纸对照（D5）**：工具栏「图纸」→ DXF 直读 / DWG 经 ODA（探测降级，缺失时
+明确提示装 ODA 或转存 DXF）；**语义提取**（螺纹 M10x1.5 / 直径 Ø8 / 公差 H7/g6，
+模块六语义真理）+ 轻依赖 SVG 渲染（LINE/CIRCLE/ARC/LWPOLYLINE/TEXT，零 PIL 依赖）。
 
 - **使用（零 Node 依赖）**：`venv/Scripts/python cad_service.py` 后浏览器打开
   `http://127.0.0.1:8764/app/`，token 支持 `?token=...` 一次性注入。构建产物
@@ -230,12 +241,14 @@ previews/
 - `feature_locator.py` — 曲面枚举 + 分类聚合 + 2D 编号定位图（Feature 模型 + 类型注册表）
 - `feature_picker.py` — 特征级 STL 切片 → 可点击 3D 预览（three.js 本地化 + SHA-256 校验）
 - `make_preview.py` — 实体整体预览
-- `cad_mcp_server.py` — FastMCP server（**10 工具**；`pick_features` / `parse_assembly` / `check_interference` 已接入；`build123d_model` 默认禁用）
+- `cad_mcp_server.py` — FastMCP server（**11 工具**；`pick_features` / `parse_assembly` / `check_interference` / `audit_assembly` 已接入；`build123d_model` 默认禁用）
 - `cad_versions.py` — 增量版本仓库（Phase C）：原子提交（R6）/ 解析链 / 指针回滚（D10）
+- `cad_drawing.py` — 图纸导入与语义校准（Phase D，D5/模块六）：DXF 直读 / DWG 经 ODA（探测降级）+ 螺纹/直径/公差提取 + 轻依赖 SVG 渲染
+- `evals/` — 评测基准集（D9）：指令三层标注 + `run_evals.py`（黄金轨迹回放 + 几何断言全自动化；LLM 对比层后续接入）
 - `cad_build.py` — build123d 字体 import-hook（跨平台无害，修复损坏系统字体导致 import 崩溃）
 - `vendor/` — 本地 three.js（three@0.160.0：`three.module.min.js` + `OrbitControls` + `STLLoader`）；见 [vendor/README.md](vendor/README.md)
 - `frontend/` — Web 前端 SPA（Vite + three.js，Phase A 骨架）；`dist/` 构建产物随仓库提交（离线运行无需 Node）
-- `tests/` — pytest 测试套件（Phase 3 建立；Phase A/B/C 增装配/服务层/编辑流用例，当前 **102 个用例全绿**）
+- `tests/` — pytest 测试套件（Phase 3 建立；Phase A/B/C/D 增装配/服务层/编辑流/图纸用例，当前 **112 个用例全绿**）
 - `pytest.ini` — pytest 配置（含 `--cov` 覆盖率）
 - `docs/architecture/copilot-vision.md` — Web Copilot 系统设想（原根目录 `设想.txt` 迁入；文首附与 ADR-0002 的差异摘要）
 - `docs/decisions/0001-ocp-vs-freecad-base.md` — ADR-0001：OCP 轻量底座 vs FreeCAD 方案对比（原 `comparison.md`）

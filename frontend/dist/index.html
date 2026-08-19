@@ -4,8 +4,8 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>CAD Copilot</title>
-    <script type="module" crossorigin src="/app/assets/index-DHGbcawR.js"></script>
-    <link rel="stylesheet" crossorigin href="/app/assets/index-DVUrtBwb.css">
+    <script type="module" crossorigin src="/app/assets/index-D7U_rMEJ.js"></script>
+    <link rel="stylesheet" crossorigin href="/app/assets/index-CSsDb9Ns.css">
   </head>
   <body>
     <div id="app">
@@ -92,12 +92,42 @@
             <input type="range" id="section-slider" min="0" max="100" value="100" />
           </div>
           <div class="tb-group">
+            <button id="btn-audit" title="一键体检：干涉 + DFM 可制造性检查">体检</button>
+            <button id="btn-drawing" title="导入 DXF/DWG 图纸对照（D5）">图纸</button>
             <button id="btn-cam-save" title="保存当前视角">存视角</button>
             <button id="btn-cam-restore" title="恢复已存视角">回视角</button>
             <button id="btn-view-reset" title="复位视图（爆炸/显隐/临时移动/相机）">复位视图</button>
           </div>
         </div>
       </main>
+      <div id="audit-modal" class="hidden">
+        <div id="audit-card">
+          <div class="fp-head">
+            <span>体检报告</span>
+            <button id="audit-close" title="关闭">×</button>
+          </div>
+          <div id="audit-body"></div>
+        </div>
+      </div>
+      <div id="drawing-modal" class="hidden">
+        <div id="drawing-card">
+          <div class="fp-head">
+            <span>图纸对照</span>
+            <button id="drawing-close" title="关闭">×</button>
+          </div>
+          <div id="drawing-body">
+            <div id="drawing-form">
+              <input id="drawing-path" placeholder="DXF / DWG 路径（服务端可见）" />
+              <button id="drawing-load">导入</button>
+              <span id="drawing-msg"></span>
+            </div>
+            <div id="drawing-split">
+              <div id="drawing-view"></div>
+              <div id="drawing-semantics"></div>
+            </div>
+          </div>
+        </div>
+      </div>
     </div>
   </body>
 </html>

@@ -192,11 +192,21 @@ def collect_features(shape):
                 perp = [(p[0], p[1]) for p in pts]; axial = [p[2] for p in pts]
             rs = [math.hypot(qx, qy) for qx, qy in perp]
             rmin, rmax = min(rs), max(rs)
-            cx = sum(qx for qx, qy in perp) / len(perp)
-            cy = sum(qy for qx, qy in perp) / len(perp)
-            loc3 = (sum(p[0] for p in pts) / len(pts),
-                    sum(p[1] for p in pts) / len(pts),
-                    sum(p[2] for p in pts) / len(pts))
+            # R1 correctness: revolved faces have seam-only topology vertices
+            # (e.g. a cylinder face's vertices sit on the seam), so the vertex
+            # average is offset from the true axis. Use the ANALYTIC axis
+            # position for the center; axial mid from the vertex extent.
+            loc_ax = ax.Location()
+            axial_mid = (min(axial) + max(axial)) / 2.0
+            if axis == "X":
+                cx, cy = loc_ax.Y(), loc_ax.Z()
+                loc3 = (axial_mid, loc_ax.Y(), loc_ax.Z())
+            elif axis == "Y":
+                cx, cy = loc_ax.X(), loc_ax.Z()
+                loc3 = (loc_ax.X(), axial_mid, loc_ax.Z())
+            else:
+                cx, cy = loc_ax.X(), loc_ax.Y()
+                loc3 = (loc_ax.X(), loc_ax.Y(), axial_mid)
             radii = sorted({round(rmax, 4), round(rmin, 4)}, reverse=True)
             out.append({"stype": stype, "axis": axis,
                         "loc": (cx, cy), "extent": max(axial) - min(axial),

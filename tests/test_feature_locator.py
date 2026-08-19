@@ -100,8 +100,13 @@ def test_feature_picker_build_runs(selftest_step):
 
 
 def test_selftest_fillet_locator(selftest_fillet):
-    # Sphere faces no longer crash (gp_Sphere().Position().Axis()); filleted
-    # parts produce vertex-blend spheres which the locator now enumerates.
+    # Sphere faces no longer crash (gp_Sphere().Position().Axis()). With the
+    # R1 analytic-axis center fix, vertex-blend spheres enumerate AND group
+    # coaxially with their cylinder (one composite feature) instead of
+    # surfacing as a separate sphere entry.
+    import cad_core
+    import feature_locator as fl
+    feats = fl.collect_features(cad_core.read_shape(selftest_fillet))
+    assert any(c["stype"] == "sphere" for c in feats)   # enumerated, no crash
     singles, _ = _locate(selftest_fillet)
     assert singles
-    assert any(c.stype == "sphere" for c in singles)

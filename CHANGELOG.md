@@ -5,6 +5,31 @@
 
 ## [未发布]
 
+### 新增 (Added)（Phase C+/D：定点编辑 / DFM 体检 / DXF 校准 / evals runner）
+- **定点特征编辑（R1 落地）**：`apply_feature_edit`（hole_resize / boss_remove——
+  从特征元数据构造定向布尔，"点哪个特征改哪个特征"）；`match_features`
+  **指纹匹配**（硬键=type+轴+位置容差，半径仅评分——扩径正是要追踪的变化）；
+  edit API 支持 `feature_id`，语义 changelog（`孔 #1.2: R1.0 -> R1.6`）；
+  编辑后特征缓存重导出并**保持 id 稳定**；前端特征面板孔特征带「扩径」。
+- **feature_locator 轴心修正（R1 测试期发现）**：回转面特征 center 原用拓扑
+  顶点平均，圆柱面顶点只在 seam 上导致中心偏移 ~2mm → 定点编辑偏心切。
+  改用解析轴位置（`Axis().Location()` + 轴向中点）；球面圆角现与同轴圆柱
+  正确聚合为复合特征（分组键本不含 stype）。
+- **一键体检（模块七）**：`dfm_audit_features` 确定性规则（小孔 R<0.5 /
+  深孔 L/D>10 / 平行孔薄壁提示）+ `audit_assembly`（干涉 + DFM 合并报告）；
+  `GET /api/assembly/audit` + MCP 第 11 个工具 `audit_assembly`；前端
+  「体检」按钮 + 报告弹层。
+- **图纸导入与语义校准（D5/模块六）**：`cad_drawing.py`——DXF 直读
+  （ezdxf 显式入 requirements）/ DWG 经 ODA（常见路径探测 + 缺失时明确
+  降级提示）；**语义提取**（螺纹 M10x1.5 / 直径 Ø8 / 公差 H7/g6 +
+  TEXT/MTEXT/DIMENSION）；轻依赖 SVG 渲染（LINE/CIRCLE/ARC/LWPOLYLINE/TEXT，
+  实体数上限防病态文件，零 PIL）；`POST /api/drawing/import` + `/drawings/`
+  静态 + 前端「图纸」弹层（SVG 对照 + 语义列表）。
+- **evals runner（D9 断言层）**：`evals/run_evals.py`——黄金轨迹本身是
+  确定性工具序列，断言层**先于 LLM 全自动化**（回放轨迹 + 几何断言）；
+  新增 2 条 team 真实指令（E003 钻孔体积断言 / E004 干涉拒绝断言），
+  runner ALL PASS；LLM 对比层（实际轨迹 vs 黄金）后续接入。
+
 ### 新增 (Added)（Phase C：AI 修改闭环 + 版本管理）
 - **`cad_versions.py` 增量版本仓库（D10）**：v0 基线 + v1..vN 链式增量（每版本只存
   被改模板的 step/gltf）；**原子提交**（临时目录 + rename，R6）+ manifest 原子写
@@ -29,8 +54,11 @@
 - **E2E（真实浏览器）验证通过**：v1 提交（螺栓钻孔，三角形 176→304 真实变化）；
   scale×2.5 触发 2 处干涉拒绝（94.248 mm³×2，版本不前移）；v0/v1 往返切换
   几何正确还原。
-- **测试**：新增 `tests/test_cad_edit_flow.py`（10 用例：版本链/回滚指针/临时清理/
-  干涉检出与放行/编辑流/坏参数/未知 id/schema 失效重建），全量 **102/102**。
+- **测试**：新增 `tests/test_cad_edit_flow.py`（14 用例：版本链/回滚指针/临时清理/
+  干涉检出与放行/编辑流/坏参数/未知 id/schema 失效重建/定点扩径/指纹匹配/
+  DFM 规则/audit 端点）与 `tests/test_cad_drawing.py`（5 用例：语义提取/
+  SVG 渲染/幂等缓存/坏输入/ODA 降级/实体上限），全量 **112/112**；evals runner
+  2 条真实指令 ALL PASS。
 
 ### 新增 (Added)（Phase B）
 - **多层级爆炸图（ADR-0002 D3 / 模块二）**：`cad_assembly.parse_assembly` 为每个

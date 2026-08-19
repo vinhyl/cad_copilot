@@ -313,3 +313,178 @@ def test_stale_schema_cache_rebuilt(client, tmp_path):
     res = r.json()
     assert res["cache_hit"] is False          # rebuilt at current schema
     assert res["manifest"]["schema_version"] == cad_assembly.SCHEMA_VERSION
+
+
+# --------------------------------------------------------------------------
+# R1: targeted feature edits + fingerprint id stability
+# --------------------------------------------------------------------------
+
+def test_apply_feature_edit_hole_resize(assembly_step):
+    """hole_resize on a drilled template enlarges ONLY that hole."""
+    manifest = cad_assembly.parse_assembly(assembly_step)
+    shapes = manifest.pop("_shapes")
+
+    # make a plate-with-hole template: drill R1 hole in the bolt first
+    drilled = cad_assembly.apply_template_edit(
+        shapes["t1"], "drill", {"radius": 1.0, "depth": 8.0})
+    v_before = cad_core.properties(drilled)["volume"]
+
+    feat = {"id": "#1", "type": "hole", "axis": "Z", "radii": [1.0],
+            "extent": 8.0, "center": [0.0, 0.0, 4.0]}
+    enlarged = cad_assembly.apply_feature_edit(
+        drilled, feat, "hole_resize", {"radius": 1.6})
+    v_after = cad_core.properties(enlarged)["volume"]
+
+    # material removed = pi*(1.6^2 - 1^2)*8 ~= 39.2
+    assert v_before - v_after > 30.0
+
+    # shrinking is rejected (no material re-add in B-rep)
+    with pytest.raises(ValueError):
+        cad_assembly.apply_feature_edit(
+            drilled, feat, "hole_resize", {"radius": 0.5})
+    with pytest.raises(ValueError):
+        cad_assembly.apply_feature_edit(
+            drilled, {"id": "x", "type": "hole", "axis": "Q", "radii": [1]},
+            "hole_resize", {"radius": 2})
+
+
+def test_match_features_fingerprint():
+    old = [
+        {"id": "#1", "label": "孔", "axis": "Z", "center": [0, 0, 4],
+         "radii": [1.0]},
+        {"id": "#2", "label": "平面", "axis": None, "center": [0, 0, 0],
+         "radii": []},
+        {"id": "#3", "label": "孔", "axis": "Z", "center": [10, 0, 4],
+         "radii": [2.0]},
+    ]
+    # after enlarging #1: re-enumerated ids, one hole bigger, plane intact
+    new = [
+        {"id": "#7", "label": "平面", "axis": None, "center": [0, 0, 0],
+         "radii": []},
+        {"id": "#8", "label": "孔", "axis": "Z", "center": [0.05, 0, 4.1],
+         "radii": [1.6]},
+        {"id": "#9", "label": "孔", "axis": "Z", "center": [10, 0, 4],
+         "radii": [2.0]},
+    ]
+    m = cad_assembly.match_features(old, new)
+    pairs = {(x["old_id"], x["new_id"]) for x in m["matched"]}
+    assert ("#1", "#8") in pairs      # enlarged hole matched by position
+    assert ("#2", "#7") in pairs      # plane matched
+    assert ("#3", "#9") in pairs
+    assert m["added"] == [] and m["removed"] == []
+
+    # a brand-new hole appears -> added
+    new2 = new + [{"id": "#10", "label": "孔", "axis": "Z",
+                   "center": [30, 0, 4], "radii": [1.0]}]
+    m2 = cad_assembly.match_features(old, new2)
+    assert "#10" in m2["added"]
+
+
+def test_edit_feature_hole_resize_service_flow(client):
+    """Full write path with feature_id: prompt -> gate -> v1 with semantic
+    changelog + refreshed feature cache with STABLE ids (R1)."""
+    body = _parse(client)
+    key = body["cache_key"]
+
+    # first drill a hole on the bolt (whole-template), commit v1
+    r0 = client.post("/api/assembly/edit", headers=_hdr(), json={
+        "cache_key": key, "template_id": "t1", "operation": "drill",
+        "params": {"radius": 1.0, "depth": 8.0}})
+    assert r0.status_code == 200, r0.text
+
+    # feature cache now contains the hole
+    cache_dir = os.path.join(str(_ws(client, key)))
+    feats = json.load(open(os.path.join(cache_dir, "features", "t1.json"),
+                           encoding="utf-8"))
+    hole = next(f for f in feats if f["type"] == "hole" and f["radii"] == [1.0])
+    hole_id = hole["id"]
+
+    # targeted resize of THAT hole only -> v2 with semantic changelog
+    r = client.post("/api/assembly/edit", headers=_hdr(), json={
+        "cache_key": key, "template_id": "t1", "operation": "hole_resize",
+        "params": {"radius": 1.6}, "feature_id": hole_id})
+    assert r.status_code == 200, r.text
+    res = r.json()
+    assert res["version"] == "v2"
+    assert "R1.0 -> R1.6" in res["changelog"]
+    assert hole_id in res["changelog"]
+
+    # refreshed feature cache keeps the hole's id STABLE (fingerprint match)
+    feats2 = json.load(open(os.path.join(cache_dir, "features", "t1.json"),
+                            encoding="utf-8"))
+    ids2 = {f["id"] for f in feats2}
+    assert hole_id in ids2
+    hole2 = next(f for f in feats2 if f["id"] == hole_id)
+    assert hole2["radii"] == [1.6]
+
+    # unknown feature id rejected
+    r2 = client.post("/api/assembly/edit", headers=_hdr(), json={
+        "cache_key": key, "template_id": "t1", "operation": "hole_resize",
+        "params": {"radius": 2.0}, "feature_id": "#999"})
+    assert r2.status_code == 400
+
+
+def _ws(client, cache_key):
+    """Locate the app workspace cache dir for a cache_key (fixture layout)."""
+    ws = client.app.state.workspace
+    return os.path.join(ws, "cache", cache_key)
+
+
+# --------------------------------------------------------------------------
+# 模块七: DFM rules + one-click audit
+# --------------------------------------------------------------------------
+
+def test_dfm_rules_on_feature_metadata():
+    feats = [
+        {"id": "#1", "type": "hole", "label": "孔", "axis": "Z",
+         "radii": [0.3], "extent": 3.0, "center": [0, 0, 1.5]},    # small hole
+        {"id": "#2", "type": "hole", "label": "孔", "axis": "Z",
+         "radii": [0.6], "extent": 15.0, "center": [0, 0, 7.5]},   # L/D=12.5 deep
+        {"id": "#3", "type": "hole", "label": "孔", "axis": "Z",
+         "radii": [1.0], "extent": 4.0, "center": [0, 0, 2.0]},    # ok
+        {"id": "#4", "type": "hole", "label": "孔", "axis": "Z",
+         "radii": [1.0], "extent": 4.0, "center": [2.4, 0, 2.0]},  # web 0.4 to #3
+        {"id": "#5", "type": "plane", "label": "平面", "axis": None,
+         "radii": [], "center": [0, 0, 0]},
+    ]
+    findings = cad_assembly.dfm_audit_features(feats)
+    rules = {f["rule"] for f in findings}
+    assert rules == {"small_hole", "deep_hole", "thin_wall_hint"}
+    small = next(f for f in findings if f["rule"] == "small_hole")
+    assert small["feature_id"] == "#1"
+    deep = next(f for f in findings if f["rule"] == "deep_hole")
+    assert deep["feature_id"] == "#2" and "12.5" in deep["detail"]
+
+    # clean set -> no findings
+    clean = [dict(feats[2]), dict(feats[4])]
+    clean[0]["center"] = [10, 0, 2.0]
+    assert cad_assembly.dfm_audit_features(clean) == []
+
+
+def test_audit_endpoint_and_mcp_tool(client):
+    body = _parse(client)
+    key = body["cache_key"]
+
+    # baseline assembly: no interference, no DFM findings
+    r = client.get(f"/api/assembly/audit?cache_key={key}", headers=_hdr())
+    assert r.status_code == 200, r.text
+    rep = r.json()
+    assert rep["interference_count"] == 0
+    assert rep["dfm_count"] == 0
+
+    # drill a deep hole (L/D = 8/0.7 = 11.4, R < 0.5) -> DFM findings
+    r2 = client.post("/api/assembly/edit", headers=_hdr(), json={
+        "cache_key": key, "template_id": "t1", "operation": "drill",
+        "params": {"radius": 0.35, "depth": 9.0}})
+    assert r2.status_code == 200, r2.text
+    r3 = client.get(f"/api/assembly/audit?cache_key={key}", headers=_hdr())
+    rep3 = r3.json()
+    assert rep3["interference_count"] == 0          # edit passed the gate
+    assert rep3["dfm_count"] >= 1
+    assert any(d["rule"] == "deep_hole" and d["part"] == "M4x8_Bolt"
+               for d in rep3["dfm"])
+    assert any(d["rule"] == "small_hole" for d in rep3["dfm"])  # R0.35 < 0.5
+
+    # audit requires auth
+    r4 = client.get(f"/api/assembly/audit?cache_key={key}")
+    assert r4.status_code == 401

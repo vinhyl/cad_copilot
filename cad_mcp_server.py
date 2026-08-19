@@ -11,6 +11,7 @@ Tools:
   - parse_assembly     : assembly STEP -> tree + 4x4 matrices + dedup part
                          templates (glTF cache for the Web frontend)
   - check_interference : boolean interference audit of an assembly (all pairs)
+  - audit_assembly     : one-click health report: interference + DFM rules
   - build123d_model    : run a build123d modeling script (DISABLED by default;
                          requires CAD_MCP_ALLOW_BUILD123D=1 -- local code execution)
 
@@ -328,6 +329,39 @@ def _iter_parts(node):
         yield node
     for ch in node.get("children", []):
         yield from _iter_parts(ch)
+
+
+@mcp.tool()
+def audit_assembly(input_path: str, out_dir: str = "") -> str:
+    """One-click health audit of an assembly STEP (模块七): interference +
+    DFM findings in a single deterministic report.
+
+    Runs the boolean interference audit (all instance pairs) plus DFM rules
+    over the classified feature set: small holes (R < 0.5mm), deep holes
+    (L/D > 10), and thin-web hints between parallel holes. No estimated
+    numbers -- every finding cites the measured geometry.
+
+    Args:
+        input_path: assembly (.step/.stp)
+        out_dir: optional folder to write the cache first (needed when the
+                 input was never parsed); reuse skipped when absent
+    Returns: JSON {interference_count, interferences, dfm_count, dfm[]}.
+    """
+    import cad_assembly  # lazy
+    import tempfile
+    if out_dir:
+        manifest = cad_assembly.build_cache(_safe_path(input_path),
+                                             _safe_path(out_dir))
+        cache_dir = _safe_path(out_dir)
+    else:
+        # parse + features in a throwaway dir (audit does not need the
+        # glTF library, only parts/*.step + features/*.json)
+        with tempfile.TemporaryDirectory() as td:
+            manifest = cad_assembly.build_cache(_safe_path(input_path), td)
+            report = cad_assembly.audit_assembly(td, manifest)
+        return json.dumps(report, ensure_ascii=False, indent=2)
+    report = cad_assembly.audit_assembly(cache_dir, manifest)
+    return json.dumps(report, ensure_ascii=False, indent=2)
 
 
 if __name__ == "__main__":

@@ -454,23 +454,51 @@ def _export_features_gltf(feature_solids: list, gltf_path: str) -> None:
         raise RuntimeError(f"RWGltf_CafWriter.Perform failed: {gltf_path}")
 
 
+def _compute_features(shape):
+    """Feature solids + metadata for one shape (lazy import)."""
+    import feature_picker  # lazy: heavy imports stay behind first use
+    solids = feature_picker.collect_feature_solids(shape)
+    meta = [{k: v for k, v in f.items() if k != "solid"} for f in solids]
+    return solids, meta
+
+
+def _write_template_features(solids: list, meta: list,
+                             feats_dir: str, tid: str) -> str:
+    """Write feats_dir/tid.{json,gltf}; returns the relative metadata path."""
+    os.makedirs(feats_dir, exist_ok=True)
+    with open(os.path.join(feats_dir, f"{tid}.json"), "w", encoding="utf-8") as fh:
+        json.dump(meta, fh, ensure_ascii=False, indent=2)
+    _export_features_gltf(solids, os.path.join(feats_dir, f"{tid}.gltf"))
+    return f"features/{tid}.json"
+
+
 def _build_template_features(shape, feats_dir: str, tid: str) -> str | None:
     """Compute features for one template; write feats_dir/tid.{json,gltf}.
 
     Returns the relative metadata path (or None when the shape yields no
     features -- degenerate input guard).
     """
-    import feature_picker  # lazy: heavy imports stay behind first use
-
-    solids = feature_picker.collect_feature_solids(shape)
+    solids, meta = _compute_features(shape)
     if not solids:
         return None
-    os.makedirs(feats_dir, exist_ok=True)
-    meta = [{k: v for k, v in f.items() if k != "solid"} for f in solids]
-    with open(os.path.join(feats_dir, f"{tid}.json"), "w", encoding="utf-8") as fh:
-        json.dump(meta, fh, ensure_ascii=False, indent=2)
-    _export_features_gltf(solids, os.path.join(feats_dir, f"{tid}.gltf"))
-    return f"features/{tid}.json"
+    return _write_template_features(solids, meta, feats_dir, tid)
+
+
+def refresh_template_features(new_shape, cache_dir: str, tid: str) -> list:
+    """Re-export a template's features after an edit, keeping feature ids
+    STABLE via fingerprint matching (R1). Returns the new feature list
+    (with old ids restored where matched)."""
+    old_json = os.path.join(cache_dir, "features", f"{tid}.json")
+    old_feats = []
+    if os.path.isfile(old_json):
+        with open(old_json, "r", encoding="utf-8") as f:
+            old_feats = json.load(f)
+
+    solids, meta = _compute_features(new_shape)
+    if meta:
+        restable_feature_ids(old_feats, meta)
+        _write_template_features(solids, meta, os.path.join(cache_dir, "features"), tid)
+    return meta
 
 
 # --------------------------------------------------------------------------
@@ -568,6 +596,139 @@ def apply_template_edit(shape, operation: str, params: dict):
             raise ValueError("scale needs factor > 0")
         return cad_core.scale_shape(shape, factor)
     raise ValueError("operation must be drill|fillet|chamfer|scale")
+
+
+# --------------------------------------------------------------------------
+# Phase C+: targeted feature edits + cross-version fingerprinting (R1)
+# --------------------------------------------------------------------------
+
+_AXIS_VEC = {"X": (1.0, 0.0, 0.0), "Y": (0.0, 1.0, 0.0), "Z": (0.0, 0.0, 1.0)}
+
+
+def apply_feature_edit(shape, feature: dict, operation: str, params: dict):
+    """Edit ONE feature in place (R1: "点哪个特征改哪个特征").
+
+    The feature dict comes from features/tN.json (feature_picker metadata):
+    {id, type, axis, radii, extent, location/center}. Supported operations
+    construct a targeted boolean from the feature's own geometry:
+
+      - hole_resize : enlarge a hole. params radius (new radius, must be
+          >= current). Cuts a cylinder along the feature axis through the
+          full feature extent (+20% overshoot each way so the new diameter
+          fully sweeps the old hole).
+      - boss_remove : cut a boss/protrusion off. Radius = max feature
+          radius * 1.05, along the axis over the extent (+overshoot).
+
+    Shrinking a hole or re-adding a boss would require ADDING material --
+    not supported (B-rep boolean fuse of a plug is a later increment).
+    """
+    op = (operation or "").lower()
+    ftype = (feature.get("type") or "").lower()
+    axis = feature.get("axis")
+    radii = feature.get("radii") or []
+    extent = float(feature.get("extent") or 0)
+    loc = feature.get("center") or feature.get("location") or [0.0, 0.0, 0.0]
+    if axis not in _AXIS_VEC:
+        raise ValueError(f"feature {feature.get('id')} has no canonical axis")
+    if not radii:
+        raise ValueError(f"feature {feature.get('id')} has no radius data")
+
+    if op == "hole_resize":
+        if ftype not in ("hole", "cylinder", "cone", "sphere"):
+            raise ValueError("hole_resize applies to hole-like features")
+        new_r = float(params.get("radius", 0))
+        cur_r = max(radii)
+        if new_r <= 0:
+            raise ValueError("hole_resize needs radius > 0")
+        if new_r < cur_r - 1e-9:
+            raise ValueError(
+                f"hole_resize cannot shrink (current R{cur_r} -> R{new_r}); "
+                "material cannot be re-added")
+        # cut along the feature axis, overshooting both ends so the new
+        # diameter fully sweeps the original hole
+        d = _AXIS_VEC[axis]
+        depth = extent * 1.4 + 2.0 * new_r + 2.0
+        start = [loc[i] - d[i] * (depth * 0.2) for i in range(3)]
+        return cad_core.drill_hole(shape, start, list(d), new_r, depth)
+
+    if op == "boss_remove":
+        if ftype not in ("boss", "cylinder", "cone", "sphere"):
+            raise ValueError("boss_remove applies to boss-like features")
+        r = max(radii) * 1.05 + 0.01
+        d = _AXIS_VEC[axis]
+        depth = extent * 1.4 + 2.0 * r + 2.0
+        start = [loc[i] - d[i] * (depth * 0.2) for i in range(3)]
+        return cad_core.drill_hole(shape, start, list(d), r, depth)
+
+    raise ValueError("operation must be hole_resize|boss_remove")
+
+
+def match_features(old_feats: list, new_feats: list,
+                   pos_tol: float = 1.0, radius_tol: float = 0.2) -> dict:
+    """Fingerprint-match feature lists across an edit (R1).
+
+    OCCT has no persistent topology naming, so feature ids are re-enumerated
+    after every edit. HARD key: (label/type, axis) equality + center
+    distance < pos_tol. Radius delta is NOT a hard veto -- the whole point
+    is tracking a feature THROUGH a radius change (hole_resize) -- it only
+    scores the pairing so concentric siblings resolve deterministically.
+    Greedy best-score-first match.
+
+    Returns {"matched": [{old_id, new_id, old_radii, new_radii}],
+             "added": [new_id...], "removed": [old_id...]}.
+    """
+    def family(f):
+        """Classification family: composite re-grouping (e.g. 孔 -> 复合沉孔)
+        must NOT break identity -- the type field (hole/boss/...) is stable
+        across edits, labels are not."""
+        return f.get("type") or f.get("label")
+
+    scored = []
+    for oi, o in enumerate(old_feats):
+        for ni, n in enumerate(new_feats):
+            if family(o) != family(n) or o.get("axis") != n.get("axis"):
+                continue
+            oc, nc = o.get("center"), n.get("center")
+            if not oc or not nc:
+                continue
+            dist = sum((a - b) ** 2 for a, b in zip(oc, nc)) ** 0.5
+            if dist > pos_tol:
+                continue
+            orr, nrr = o.get("radii") or [], n.get("radii") or []
+            rdelta = (abs(max(orr) - max(nrr)) if orr and nrr else 1.0)
+            scored.append((dist + 0.5 * rdelta, oi, ni))
+    scored.sort()
+
+    old_ids = [f.get("id") for f in old_feats]
+    new_ids = [f.get("id") for f in new_feats]
+    used_o, used_n = set(), set()
+    matched = []
+    for _, oi, ni in scored:
+        if oi in used_o or ni in used_n:
+            continue
+        used_o.add(oi)
+        used_n.add(ni)
+        matched.append({
+            "old_id": old_feats[oi].get("id"), "new_id": new_feats[ni].get("id"),
+            "old_radii": old_feats[oi].get("radii"),
+            "new_radii": new_feats[ni].get("radii"),
+        })
+    return {
+        "matched": matched,
+        "added": [nid for i, nid in enumerate(new_ids) if i not in used_n],
+        "removed": [oid for i, oid in enumerate(old_ids) if i not in used_o],
+    }
+
+
+def restable_feature_ids(old_feats: list, new_feats: list) -> list:
+    """Re-key new_feats with the OLD ids where fingerprints match (stable
+    feature identity across versions, D10/R1). Mutates + returns new_feats."""
+    m = match_features(old_feats, new_feats)
+    mapping = {x["new_id"]: x["old_id"] for x in m["matched"]}
+    for f in new_feats:
+        if f.get("id") in mapping:
+            f["id"] = mapping[f["id"]]
+    return new_feats
 
 
 def _world_instances(manifest: dict, template_shapes: dict) -> list:
@@ -699,3 +860,96 @@ def template_shapes_from_cache(cache_dir: str, manifest: dict) -> dict:
         if os.path.isfile(p):
             shapes[t["id"]] = cad_core.read_shape(p)
     return shapes
+
+
+# --------------------------------------------------------------------------
+# Phase C+: DFM audit rules (模块七 一键体检, deterministic)
+# --------------------------------------------------------------------------
+
+# (rule_id, severity, description) -- thresholds in mm, CNC 普通刀具口径
+DFM_RULES = {
+    "small_hole": {
+        "severity": "warning",
+        "min_radius": 0.5,
+        "desc": "孔径过小（R<{min_radius}mm）：小于常用最小钻头，需微钻/EDM"},
+    "deep_hole": {
+        "severity": "warning",
+        "ratio": 10.0,
+        "desc": "深径比 > {ratio}:1（深孔排屑困难，需深孔钻/分步）"},
+    "thin_wall_hint": {
+        "severity": "info",
+        "min_gap": 1.0,
+        "desc": "平行孔间距 < {min_gap}mm×孔径和：孔间壁厚过薄风险"},
+}
+
+
+def dfm_audit_features(features: list) -> list:
+    """Run deterministic DFM rules over ONE template's feature metadata.
+
+    Returns a list of {rule, severity, feature_id, detail} findings.
+    Rules are evaluated on the classified feature list (holes/bosses with
+    radii/extent) -- no numeric estimation, ever (D8).
+    """
+    findings = []
+    holes = [f for f in features if f.get("type") == "hole" and f.get("radii")]
+    for f in holes:
+        r = max(f["radii"])
+        if r < DFM_RULES["small_hole"]["min_radius"]:
+            findings.append({
+                "rule": "small_hole", "severity": "warning",
+                "feature_id": f.get("id"),
+                "detail": f"R{r} < {DFM_RULES['small_hole']['min_radius']}mm "
+                          f"({f.get('label')} {f.get('id')})"})
+        dia = 2.0 * r
+        if dia > 0 and (f.get("extent") or 0) / dia > DFM_RULES["deep_hole"]["ratio"]:
+            findings.append({
+                "rule": "deep_hole", "severity": "warning",
+                "feature_id": f.get("id"),
+                "detail": f"L/D = {f['extent'] / dia:.1f} > "
+                          f"{DFM_RULES['deep_hole']['ratio']}:1 "
+                          f"({f.get('label')} {f.get('id')} L{f['extent']})"})
+
+    # parallel holes with thin web between them (same axis, close centers)
+    min_gap = DFM_RULES["thin_wall_hint"]["min_gap"]
+    for i in range(len(holes)):
+        for j in range(i + 1, len(holes)):
+            a, b = holes[i], holes[j]
+            if a.get("axis") != b.get("axis") or not a.get("center") or not b.get("center"):
+                continue
+            dist = sum((x - y) ** 2 for x, y in zip(a["center"], b["center"])) ** 0.5
+            web = dist - max(a["radii"]) - max(b["radii"])
+            if 0 < web < min_gap:
+                findings.append({
+                    "rule": "thin_wall_hint", "severity": "info",
+                    "feature_id": f"{a.get('id')}+{b.get('id')}",
+                    "detail": f"两孔间壁厚 {web:.2f}mm < {min_gap}mm"})
+    return findings
+
+
+def audit_assembly(cache_dir: str, manifest: dict) -> dict:
+    """一键体检（模块七导入角色）：干涉 + DFM 全量审计。
+
+    Combines the boolean interference audit (all instance pairs) with the
+    per-template DFM rule scan over cached feature metadata. Deterministic
+    throughout (D8).
+    """
+    shapes = template_shapes_from_cache(cache_dir, manifest)
+    interferences = check_interference(manifest, shapes)
+    dfm = []
+    for t in manifest["templates"]:
+        if not t.get("features"):
+            continue
+        fp = os.path.join(cache_dir, t["features"])
+        if not os.path.isfile(fp):
+            continue
+        with open(fp, encoding="utf-8") as f:
+            feats = json.load(f)
+        for finding in dfm_audit_features(feats):
+            finding["part"] = t["name"]
+            dfm.append(finding)
+    return {
+        "interference_count": len(interferences),
+        "interferences": interferences,
+        "dfm_count": len(dfm),
+        "dfm": dfm,
+    }
