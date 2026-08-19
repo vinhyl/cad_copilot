@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
+import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 
 const BASE_COLOR = new THREE.Color(0xffffff);
 const SELECT_COLOR = new THREE.Color(0xff8a3d);
@@ -36,6 +37,10 @@ export class AssemblyScene {
     const dir = new THREE.DirectionalLight(0xffffff, 1.4);
     dir.position.set(50, 80, 30);
     this.scene.add(dir);
+    // OCP 导出的 glTF 材质 metalness/roughness 常为 1.0：无环境贴图时
+    // 金属面渲染成暗色。RoomEnvironment 提供中性 PBR 环境光修正此问题。
+    const pmrem = new THREE.PMREMGenerator(this.renderer);
+    this.scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
 
     this.group = new THREE.Group();
     this.scene.add(this.group);
