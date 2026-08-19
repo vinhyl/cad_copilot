@@ -5,6 +5,23 @@
 
 ## [未发布]
 
+### 工程验证 (Engineering)
+- **Phase A 去风险 spike 全部通过**（XCAF + glTF，2026-08-19）：
+  - **Spike 1 XCAF 往返 7/7**：STEPCAFControl 写/读 2 层命名装配，
+    层级、零件名、颜色、**累积世界 4×4 矩阵**、同规格零件多实例与
+    ReferredShape 去重全部成立——R2/D3 的 OCP 能力确认。
+  - **Spike 2 glTF 导出 10/10**：RWGltf 节点层级/命名/局部平移正确；
+    **发现 RWGltf 不自动去重同模板 mesh**（每实例一份几何），
+    JSON 后处理去重方案已验证（同模板实例指向同一 mesh）——Phase A
+    实现注记。
+- **新增 `tests/_assembly_helpers.py` + `tests/test_xcaf_assembly.py`**：
+  spike 结论固化为可回归的黄金断言（9 个用例：树结构/命名/矩阵/去重/
+  颜色/glTF 节点与去重后处理），装配 STEP 测试时生成进临时目录
+  （不提交二进制样例）。**全量 55/55 通过**。
+- **新增 `evals/` 基准集骨架**（ADR-0002 D9）：指令收集模板
+  （三层标注：意图/黄金轨迹/几何断言）+ 状态流转（draft → annotated →
+  verified）+ 2 条示例条目；真实指令随日常开发积累。
+
 ### 文档 (Docs)
 - **新增 ADR-0002**《Web-based AI CAD Copilot 系统扩展决策》：D1–D10 十项决策
   （四阶段路线 / 双 transport 分层 / Template+Matrix 解耦 / 2D 对照降级 / DWG 默认开启 /

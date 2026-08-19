@@ -1,0 +1,55 @@
+# Prompt 评测指令集（ADR-0002 D9）
+# 三层标注说明见同目录 README.md。示例条目（source: example）不计入
+# 30-50 条真实指令目标数，仅作格式参照；真实指令请按 draft -> annotated
+# -> verified 流转补全。
+
+instructions:
+  # ---- 示例条目（格式参照） ------------------------------------------
+  - id: "E001"
+    source: example            # example | team
+    status: annotated          # draft | annotated | verified
+    instruction: "把这根轴换个大号的"
+    target:
+      part: "待标注（如 M4x8_Bolt / Shaft）"
+      feature: "待标注（如 通孔 / 螺纹）"
+    golden_trajectory:
+      - tool: extract_properties
+        note: "先定位目标零件并确认当前规格"
+      - tool: pick_features
+        note: "锁定目标特征（孔/轴）作为修改上下文"
+      - tool: edit_geometry
+        args:
+          operation: drill      # 或具体替换操作
+          approx: true
+        note: "按标准件规格表选型（如 M8 -> M10），参数由选型表决定"
+    assertions:
+      - type: feature_measure
+        check: "目标孔/轴直径从 8mm 变为 10mm（容差 ±0.01）"
+      - type: invariant
+        check: "其余特征拓扑不变"
+
+  - id: "E002"
+    source: example
+    status: annotated
+    instruction: "让这里更结实一点"
+    target:
+      part: "待标注（如 BasePlate）"
+      feature: "待标注（如 侧壁 / 薄壁区域）"
+    golden_trajectory:
+      - tool: extract_properties
+        note: "当前壁厚/体积基线"
+      - tool: edit_geometry
+        args:
+          approx: true
+        note: "预期生成 2-3 个预设方案（加厚/加强筋/换材料），用户点选后执行"
+    assertions:
+      - type: volume_delta
+        check: "体积增加量落在所选方案的声明范围内"
+      - type: dfm
+        check: "壁厚不低于 DFM 最小值（如 1mm）"
+
+  # ---- 真实指令收集区（从 draft 开始，随手记原话） --------------------
+  # - id: "R001"
+  #   source: team
+  #   status: draft
+  #   instruction: "<原话>"
