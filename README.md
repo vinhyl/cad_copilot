@@ -73,6 +73,12 @@ venv/bin/python        cad_mcp_server.py    # macOS / Linux
 > **切勿**在不可信、共享或多租户环境中启用。其余 7 个工具的路径都被限制在
 > `CAD_MCP_ALLOWED_DIRS` 白名单内（默认 `.`，即 server 工作目录）。
 
+> 数据隐私备注：Agent 调用本 server 时，工具返回值（特征元数据 / 物性 / 文件清单 /
+> 修改参数）与整个会话历史会进入所接 LLM 的上下文，且**跨调用累积**（一次会话可拼出
+> 零件的完整语义画像）。团队现阶段**批准使用云端 LLM**，覆盖日常 Agent 使用与后续
+> 评测飞轮。复评触发点：Phase C 自然语言修改上线前 / 对外分发前 / 更换模型供应商。
+> 完整分析见 [ADR-0002 风险登记 R10](docs/decisions/0002-web-copilot-expansion.md)。
+
 ### 验证连接（mcp_test.py）
 开发期可用 `mcp_test.py` 端到端验证 server（它会拉起 server 并真跑几个工具）：
 ```bash
@@ -162,7 +168,9 @@ previews/
 - `vendor/` — 本地 three.js（three@0.160.0：`three.module.min.js` + `OrbitControls` + `STLLoader`）；见 [vendor/README.md](vendor/README.md)
 - `tests/` — pytest 测试套件（Phase 3 建立，46 个用例全绿）
 - `pytest.ini` — pytest 配置（含 `--cov` 覆盖率）
-- `docs/decisions/comparison.md` — 方案对比决策记录（原仓库根 `comparison.md`，已归档）
+- `docs/architecture/copilot-vision.md` — Web Copilot 系统设想（原根目录 `设想.txt` 迁入；文首附与 ADR-0002 的差异摘要）
+- `docs/decisions/0001-ocp-vs-freecad-base.md` — ADR-0001：OCP 轻量底座 vs FreeCAD 方案对比（原 `comparison.md`）
+- `docs/decisions/0002-web-copilot-expansion.md` — ADR-0002：Web Copilot 扩展决策（D1–D10 + 延续约束 + 风险登记 R1–R17）
 - `CHANGELOG.md` — 版本变更记录（基线 v0.1.0）
 - `selftest*.step` / `selftest.iges` — 示例输入，用于冒烟测试
 

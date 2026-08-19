@@ -3,6 +3,26 @@
 所有重要变更记录于此文件。格式参考 [Keep a Changelog](https://keepachangelog.com/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [未发布]
+
+### 文档 (Docs)
+- **新增 ADR-0002**《Web-based AI CAD Copilot 系统扩展决策》：D1–D10 十项决策
+  （四阶段路线 / 双 transport 分层 / Template+Matrix 解耦 / 2D 对照降级 / DWG 默认开启 /
+  FreeCAD 子进程隔离 / 插件化 / AI 确定性边界 / 评测飞轮 / 图模一致性）、
+  两项延续约束、以及风险登记 **R1–R17**（R1–R12 为 2026-08-19 全面复审新增：
+  含 R1 特征身份稳定性 / 拓扑命名问题、R11 多用户模式已决策为单机单用户、
+  R10 数据隐私阶段性决策——现阶段批准云端 LLM，README 增数据隐私备注；
+  R13–R17 为运行时流程核对新增：断线重连 / 同机多窗口写独占 /
+  写失败结构化呈现 / workspace 生命周期 / 重复导入幂等）。
+- **copilot-vision.md 模块二扩充**（Phase B 范围）：新增**视图操作集**
+  （隐藏/隔离/X光/临时拖拽/自定义爆炸/剖切面/相机书签，含"视图状态 ≠ 数据状态"
+  边界原则与拖拽双含义区分）与**选择层级交互原则**（装配树主锚点 / 视口点选
+  消歧升档 / 状态可见性 / 复位分层）。
+- **文档结构整理**：ADR 编号化（`comparison.md` → `0001-ocp-vs-freecad-base.md`）；
+  根目录《Web-based AI CAD Copilot 系统扩展设想.txt》迁入
+  `docs/architecture/copilot-vision.md` 并**首次纳入版本库**（文首附与 ADR-0002 的
+  差异摘要，被修订段落加注）；`.workbuddy/` 加入 `.gitignore`。
+
 ## [v0.1.1] — 2026-08-19（CI 修复，未重打 tag）
 
 ### 修复 (Fixes)

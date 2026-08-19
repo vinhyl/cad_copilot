@@ -32,3 +32,6 @@ mcp_test.py
 # ---- Local config / OS ----
 .env
 .DS_Store
+
+# ---- Agent working memory (not project docs) ----
+.workbuddy/
