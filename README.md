@@ -94,13 +94,30 @@ venv/Scripts/python cad_service.py     # http://127.0.0.1:8764（token 启动时
 | `GET /health` | 健康检查（免鉴权，仅本机） |
 | `POST /api/assembly/parse` | 装配 STEP → manifest + 写缓存（Bearer token） |
 | `GET /cache/{key}/...` | 静态服务缓存产物（tree_structure.json / gltf_library，防目录穿越） |
+| `GET /app/` | Web 前端 SPA（`frontend/dist` 构建产物，见下节） |
 | `WS /ws?token=...` | JSON 协议骨架（ping / parse；任务队列与进度事件为后续增量） |
 
 要点：缓存目录按源文件 **SHA-256 前 16 位** 命名——同内容重复导入直接命中
 （`cache_hit: true`），内容变化自动换键（R8/R17）；几何操作全局串行锁（R4）；
 仅绑 127.0.0.1、token 鉴权、无 CORS（延续约束一）。
 配置：`CAD_SERVICE_TOKEN` / `CAD_SERVICE_ALLOWED_DIRS` / `CAD_SERVICE_WORKSPACE` /
-`CAD_SERVICE_HOST` / `CAD_SERVICE_PORT`。
+`CAD_SERVICE_HOST` / `CAD_SERVICE_PORT` / `CAD_SERVICE_FRONTEND_DIR`。
+
+## Web 前端（Phase A 骨架）
+
+`frontend/` 为 Vite + three.js（版本与 `vendor/` 一致：three@0.160.0）+ 原生 JS 的
+SPA 骨架：加载装配 STEP → **Template+Matrix 实例化渲染**（每个唯一零件一份 glTF
+几何，全部实例共享 `InstancedMesh`，矩阵来自 manifest 的累积世界 4×4）+ 装配树 UI
+（选择层级双向联动：树上点选高亮 3D 实例 / 视口点选定位树上节点；按节点显隐）。
+
+- **使用（零 Node 依赖）**：`venv/Scripts/python cad_service.py` 后浏览器打开
+  `http://127.0.0.1:8764/app/`，token 支持 `?token=...` 一次性注入。构建产物
+  `frontend/dist/` **随仓库提交**，与 `vendor/` 同哲学——分发时带走仓库即可离线运行。
+- **开发（需 Node 18+）**：`cd frontend && npm install`，之后 `npm run dev`
+  （5173 端口，API/WS 代理到 8764，改源码热更新）；发布前 `npm run build` 并提交
+  新的 `dist/`。
+- token 经 localStorage 保存；`/cache/` 静态文件不设 token（GLTFLoader 无法附带
+  请求头）——仅本机监听 + 无 CORS 下可接受（ADR-0002 延续约束一的本地化取舍）。
 
 ### 验证连接（mcp_test.py）
 开发期可用 `mcp_test.py` 端到端验证 server（它会拉起 server 并真跑几个工具）：
@@ -191,7 +208,8 @@ previews/
 - `cad_mcp_server.py` — FastMCP server（**9 工具**；`pick_features` / `parse_assembly` 已接入；`build123d_model` 默认禁用）
 - `cad_build.py` — build123d 字体 import-hook（跨平台无害，修复损坏系统字体导致 import 崩溃）
 - `vendor/` — 本地 three.js（three@0.160.0：`three.module.min.js` + `OrbitControls` + `STLLoader`）；见 [vendor/README.md](vendor/README.md)
-- `tests/` — pytest 测试套件（Phase 3 建立；Phase A 增装配/服务层用例，当前 **83 个用例全绿**）
+- `frontend/` — Web 前端 SPA（Vite + three.js，Phase A 骨架）；`dist/` 构建产物随仓库提交（离线运行无需 Node）
+- `tests/` — pytest 测试套件（Phase 3 建立；Phase A 增装配/服务层/前端服务用例，当前 **87 个用例全绿**）
 - `pytest.ini` — pytest 配置（含 `--cov` 覆盖率）
 - `docs/architecture/copilot-vision.md` — Web Copilot 系统设想（原根目录 `设想.txt` 迁入；文首附与 ADR-0002 的差异摘要）
 - `docs/decisions/0001-ocp-vs-freecad-base.md` — ADR-0001：OCP 轻量底座 vs FreeCAD 方案对比（原 `comparison.md`）

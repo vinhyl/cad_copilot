@@ -183,3 +183,50 @@ def test_ws_unknown_action(client):
         ws.send_json({"action": "bogus"})
         resp = ws.receive_json()
     assert resp["ok"] is False
+
+
+# --------------------------------------------------------------------------
+# SPA static serving (/app) -- dist is committed, so these run everywhere
+# --------------------------------------------------------------------------
+
+import re  # noqa: E402
+
+DIST = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                    "frontend", "dist")
+HAS_DIST = os.path.isfile(os.path.join(DIST, "index.html"))
+
+
+@pytest.mark.skipif(not HAS_DIST, reason="frontend/dist not built")
+def test_app_index_served(client):
+    r = client.get("/app/")
+    assert r.status_code == 200
+    assert "text/html" in r.headers["content-type"]
+    assert 'id="app"' in r.text
+    assert 'id="viewport"' in r.text
+
+
+@pytest.mark.skipif(not HAS_DIST, reason="frontend/dist not built")
+def test_app_built_assets_served(client):
+    r = client.get("/app/")
+    m = re.search(r'src="([^"]+\.js)"', r.text)
+    assert m, "index.html must reference the built js bundle"
+    asset = m.group(1)
+    r2 = client.get(asset if asset.startswith("/") else f"/app{asset}")
+    assert r2.status_code == 200
+    assert "javascript" in r2.headers["content-type"]
+    assert len(r2.content) > 1000
+
+
+@pytest.mark.skipif(not HAS_DIST, reason="frontend/dist not built")
+def test_app_spa_fallback(client):
+    r = client.get("/app/some/client/route")
+    assert r.status_code == 200
+    assert 'id="app"' in r.text
+
+
+@pytest.mark.skipif(not HAS_DIST, reason="frontend/dist not built")
+def test_app_traversal_no_source_leak(client):
+    for probe in ("/app/../cad_service.py", "/app/%2e%2e/cad_service.py"):
+        r = client.get(probe)
+        assert r.status_code in (200, 403, 404)
+        assert "def create_app" not in r.text  # never leak server source

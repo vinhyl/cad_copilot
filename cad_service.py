@@ -47,8 +47,20 @@ from cad_core import _SuppressStdout
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8764
 
+_REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
+DEFAULT_FRONTEND_DIR = os.path.join(_REPO_ROOT, "frontend", "dist")
+
 # R4: OCCT is not thread-safe; serialize all geometry calls.
 _GEOMETRY_LOCK = threading.Lock()
+
+# Explicit MIME map for the SPA static server (Windows registry mimetypes
+# can mislabel .js as text/plain -- CI runs on all 3 platforms).
+_MIME = {
+    ".html": "text/html", ".js": "text/javascript", ".mjs": "text/javascript",
+    ".css": "text/css", ".json": "application/json", ".svg": "image/svg+xml",
+    ".png": "image/png", ".ico": "image/x-icon", ".map": "application/json",
+    ".wasm": "application/wasm",
+}
 
 
 # --------------------------------------------------------------------------
@@ -57,7 +69,8 @@ _GEOMETRY_LOCK = threading.Lock()
 
 def create_app(token: str | None = None,
                allowed_dirs: list[str] | None = None,
-               workspace: str | None = None) -> Starlette:
+               workspace: str | None = None,
+               frontend_dir: str | None = None) -> Starlette:
     """Build the service app.
 
     Args (None -> read from env -> sensible default):
@@ -67,6 +80,9 @@ def create_app(token: str | None = None,
             Default: CAD_SERVICE_ALLOWED_DIRS env or the cwd.
         workspace: root for cache output. Default: CAD_SERVICE_WORKSPACE
             env or ./workspace.
+        frontend_dir: built SPA directory served at /app/. Default:
+            CAD_SERVICE_FRONTEND_DIR env or ./frontend/dist. Missing dir ->
+            /app returns 503 with a hint (run npm run build).
     """
     token = token or os.environ.get("CAD_SERVICE_TOKEN") or secrets.token_urlsafe(24)
     allowed_dirs = allowed_dirs or [
@@ -78,6 +94,9 @@ def create_app(token: str | None = None,
         workspace or os.environ.get("CAD_SERVICE_WORKSPACE", "workspace"))
     cache_root = os.path.join(workspace, "cache")
     os.makedirs(cache_root, exist_ok=True)
+    frontend_dir = os.path.realpath(
+        frontend_dir or os.environ.get("CAD_SERVICE_FRONTEND_DIR",
+                                       DEFAULT_FRONTEND_DIR))
 
     def safe_input_path(p: str) -> str:
         """Resolve p and confine it to allowed_dirs (MCP _safe_path semantics)."""
@@ -181,6 +200,29 @@ def create_app(token: str | None = None,
             pass
 
     # ----------------------------------------------------------------------
+    # SPA static serving (/app) -- same origin as /api and /cache (no CORS)
+    # ----------------------------------------------------------------------
+
+    async def app_static(request):
+        if not os.path.isdir(frontend_dir):
+            return JSONResponse(
+                {"error": "frontend not built; run `npm install && npm run build` "
+                          "in frontend/ (dist/ is normally committed)"},
+                status_code=503)
+        rel = request.path_params.get("rest", "")
+        fp = os.path.realpath(os.path.join(frontend_dir, rel))
+        if fp != frontend_dir and not fp.startswith(frontend_dir + os.sep):
+            return JSONResponse({"error": "forbidden"}, status_code=403)
+        if os.path.isfile(fp):
+            return FileResponse(
+                fp, media_type=_MIME.get(os.path.splitext(fp)[1].lower()))
+        # SPA fallback: unknown paths serve the app shell
+        index = os.path.join(frontend_dir, "index.html")
+        if os.path.isfile(index):
+            return FileResponse(index, media_type="text/html")
+        return JSONResponse({"error": "not found"}, status_code=404)
+
+    # ----------------------------------------------------------------------
     # Routes
     # ----------------------------------------------------------------------
 
@@ -191,11 +233,14 @@ def create_app(token: str | None = None,
         Route("/health", health, methods=["GET"]),
         Route("/api/assembly/parse", parse, methods=["POST"]),
         Route("/cache/{rest:path}", cache_file, methods=["GET"]),
+        Route("/app", app_static, methods=["GET"]),
+        Route("/app/{rest:path}", app_static, methods=["GET"]),
         WebSocketRoute("/ws", ws),
     ], exception_handlers={404: not_found})
     app.state.token = token
     app.state.allowed_dirs = allowed_dirs
     app.state.workspace = workspace
+    app.state.frontend_dir = frontend_dir
     return app
 
 

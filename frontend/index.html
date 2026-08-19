@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>CAD Copilot</title>
+  </head>
+  <body>
+    <div id="app">
+      <aside id="sidebar">
+        <h1>CAD Copilot</h1>
+        <form id="load-form">
+          <input id="path-input" placeholder="装配体 STEP 路径（服务端可见）" autocomplete="off" />
+          <label class="force-row" title="忽略缓存键，强制重新解析并重建缓存">
+            <input type="checkbox" id="force" /> 强制重建缓存
+          </label>
+          <button type="submit" id="load-btn">加载</button>
+        </form>
+        <div id="status" class="idle">输入路径并加载</div>
+        <div id="tree"></div>
+      </aside>
+      <main id="viewport"></main>
+    </div>
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>

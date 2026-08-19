@@ -35,3 +35,8 @@ mcp_test.py
 
 # ---- Agent working memory (not project docs) ----
 .workbuddy/
+
+# ---- Frontend ----
+node_modules/
+!frontend/index.html
+!frontend/dist/**
