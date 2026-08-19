@@ -3,6 +3,16 @@
 所有重要变更记录于此文件。格式参考 [Keep a Changelog](https://keepachangelog.com/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [v0.1.1] — 2026-08-19（CI 修复，未重打 tag）
+
+### 修复 (Fixes)
+- **vendor 在 Windows CI 误报 tampered**：`.gitattributes` 将 3 个 vendored three.js
+  文件标记为 `-binary`，禁止 `core.autocrlf`/`eol` 把 `.js` 转换成 CRLF（否则
+  SHA-256 不匹配、离线预览拒绝运行）。已确认仓库内 blob 已为 LF 存储，无需重新入库。
+- **`tests/test_feature_picker_stl.py` 在 `pytest tests/`（目录调用）下 `ModuleNotFoundError: _compare_helpers`**：
+  `tests/conftest.py` 现在把 `tests/` 自身加入 `sys.path`，使兄弟 helper 模块在任意
+  pytest 调用形态（单文件 / 目录 / 跨 runner 版本差异）下都可导入。
+
 ## [v0.1.0] — 2026-08-16
 
 工程保障团队对 `cad_tools` 的全链路审查（Phase 0–4）修复收口基线。

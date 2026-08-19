@@ -1,0 +1,8 @@
+# Keep vendored three.js files byte-identical on every platform. These are
+# pinned by SHA-256 in feature_picker._VENDOR_SHA256 for tamper protection; if
+# git line-ending normalization rewrites them (e.g. CRLF on Windows checkouts)
+# the hashes no longer match and the offline preview refuses to run. Marking
+# them -text/-binary stops any autocrlf/eol conversion.
+/vendor/three.module.min.js binary
+/vendor/jsm/controls/OrbitControls.js binary
+/vendor/jsm/loaders/STLLoader.js binary
