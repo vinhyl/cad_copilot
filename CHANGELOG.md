@@ -6,6 +6,12 @@
 ## [未发布]
 
 ### 新增 (Added)
+- **`cad_service.py`（Phase A 服务层骨架，ADR-0002 D2）**：starlette 本地服务
+  （零新增依赖），HTTP + WebSocket 双通道共享 MCP 同一工具库；仅绑 127.0.0.1 +
+  token 鉴权 + 防穿越静态缓存服务（延续约束一）；缓存目录按源 SHA-256 前 16 位
+  命名——同内容重复导入幂等命中（R8/R17）；几何操作全局串行锁（R4）。
+  端点：`/health`、`POST /api/assembly/parse`、`GET /cache/{key}/...`、
+  `WS /ws`（ping/parse 协议骨架，任务队列与进度事件为后续增量）。
 - **`cad_assembly.py`（Phase A 生产模块，ADR-0002 D3）**：装配体 STEP →
   Template+Matrix manifest——命名装配树（含累积世界 4×4 矩阵）+ 按 ReferredShape
   去重的零件模板表；`build_cache()` 写出前端缓存布局（`tree_structure.json` +
@@ -15,8 +21,9 @@
   多根 STEP → 合成根节点。
 - **MCP 新工具 `parse_assembly`（第 9 个）**：暴露上述能力给 agent，
   docstring 即契约；路径走 `CAD_MCP_ALLOWED_DIRS` 白名单。
-- **`tests/test_cad_assembly.py`（13 用例）**：manifest 结构/矩阵/模板去重/
-  R2 平铺兜底/缓存布局/MCP 契约（含路径逃逸拒绝）。全量 **68/68 通过**。
+- **`tests/test_cad_assembly.py`（13 用例）+ `tests/test_cad_service.py`（15 用例）**：
+  manifest 结构/矩阵/模板去重/R2 平铺兜底/缓存布局/MCP 契约（含路径逃逸拒绝）；
+  服务层 token 鉴权/SHA 键控幂等缓存/防穿越静态服务/WS 协议。全量 **83/83 通过**。
 
 ### 工程验证 (Engineering)
 - **Phase A 去风险 spike 全部通过**（XCAF + glTF，2026-08-19）：
