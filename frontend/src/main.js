@@ -4,20 +4,53 @@ import { AssemblyTree } from './tree.js';
 import {
   getToken, setToken, parseAssembly, editAssembly, listVersions,
   checkoutVersion, auditAssembly, importDrawing,
-  getPlugins, startFeaJob, startRenderJob, getJob, cancelJob,
+  getPlugins, getConfig, uploadFile, startFeaJob, startRenderJob,
+  getJob, cancelJob,
 } from './api.js';
 
-// ---- token 引导：URL ?token= 一次性注入 localStorage（本地单用户工具约定）----
+// ---- URL 一次性参数引导（本地单用户工具约定）----
+// ?token= 注入 localStorage；?load=<encodeURIComponent(路径)> 供 agent
+// 生成可点击预览链接（文件末尾按扩展名路由装配/图纸）。URLSearchParams
+// 已解码一次，这里不再二次 decode——agent 侧须用 encodeURIComponent 编码。
 const params = new URLSearchParams(location.search);
+let bootLoadPath = null;
+let urlDirty = false;
 if (params.get('token')) {
   setToken(params.get('token'));
   params.delete('token');
-  history.replaceState(null, '', `${location.pathname}${params}`);
+  urlDirty = true;
+}
+if (params.get('load')) {
+  bootLoadPath = params.get('load');
+  params.delete('load');
+  urlDirty = true;
+}
+if (urlDirty) {
+  const qs = params.toString();
+  history.replaceState(null, '', location.pathname + (qs ? `?${qs}` : ''));
 }
 if (!getToken()) {
   const t = window.prompt('服务 token（cad_service 启动时打印）：');
   if (t) setToken(t);
 }
+
+// ---- 服务配置：可访问目录（错误文案用） ----
+// 输入已全部走上传/拖放/最近使用（显式授权通道），路径手输不再存在；
+// 服务端 safe_input_path 仍是权威校验，这里只为 403 兜底文案提供目录列表。
+let allowedDirs = [];
+
+function pathDeniedMsg() {
+  return '路径不在服务可访问目录内。请将文件移入：'
+    + (allowedDirs.join('；') || '（未知）')
+    + '；或重启服务时设置环境变量 CAD_SERVICE_ALLOWED_DIRS 添加目录（多个用 ; 分隔）';
+}
+
+async function refreshConfig() {
+  try {
+    allowedDirs = (await getConfig()).allowed_dirs || [];
+  } catch { /* 配置获取失败不阻塞主流程 */ }
+}
+refreshConfig();
 
 // ---- 组件 ----
 const scene = new AssemblyScene(document.getElementById('viewport'));
@@ -155,15 +188,21 @@ drawingModal.addEventListener('click', (e) => {
   if (e.target === drawingModal) drawingModal.classList.add('hidden');
 });
 $('#btn-drawing').addEventListener('click', () => drawingModal.classList.remove('hidden'));
-$('#drawing-load').addEventListener('click', async () => {
-  const p = $('#drawing-path').value.trim();
+$('#drawing-browse').addEventListener('click', () => $('#file-input').click());
+
+// 图纸导入主体：上传路由 / 最近使用 / 弹窗浏览共用。
+// 同时更新弹窗 msg 与侧栏主状态栏——否则上传触发的导入会让主状态栏
+// 停留在"上传中"。
+async function importDrawingFile(p) {
   const msg = $('#drawing-msg');
-  if (!p) return;
   msg.textContent = '导入中…';
+  status('图纸导入中…');
   try {
     const res = await importDrawing(p);
-    msg.textContent = `${res.source_file}${res.cache_hit ? ' · 缓存命中' : ''} · `
+    const summary = `${res.source_file}${res.cache_hit ? ' · 缓存命中' : ''} · `
       + `${res.oda_used ? 'ODA 转换' : 'DXF 直读'} · ${res.entity_count} 实体`;
+    msg.textContent = summary;
+    status(`图纸：${summary}`);
     // SVG 直插（同源静态服务）
     const r = await fetch(`${res.base_url}/view.svg`);
     $('#drawing-view').innerHTML = await r.text();
@@ -182,10 +221,14 @@ $('#drawing-load').addEventListener('click', async () => {
       sem.append(row);
       row.append(kind, val);
     });
+    pushRecent(p, 'drawing');
   } catch (err) {
-    msg.textContent = `错误：${err.message}`;
+    const denied = err.message.includes('outside allowed dirs');
+    const text = denied ? pathDeniedMsg() : `错误：${err.message}`;
+    msg.textContent = text;
+    status(text, true);
   }
-});
+}
 
 // ---- 插件状态面板（D5/D7 探测 + 优雅降级） ----
 const PLUGIN_DEFS = [
@@ -649,11 +692,9 @@ async function refreshVersions() {
   }
 }
 
-// ---- 加载表单 ----
-const form = $('#load-form');
-const pathInput = $('#path-input');
+// ---- 加载状态与装配加载主体 ----
 const forceBox = $('#force');
-const loadBtn = $('#load-btn');
+const browseBtn = $('#btn-browse');
 const statusEl = $('#status');
 
 function status(text, isError = false) {
@@ -665,11 +706,9 @@ let lastManifest = null;
 let lastBaseUrl = null;
 let lastCacheKey = null;
 
-form.addEventListener('submit', async (e) => {
-  e.preventDefault();
-  const p = pathInput.value.trim();
-  if (!p) return;
-  loadBtn.disabled = true;
+// 装配加载主体：上传路由 / 最近使用共用（路径手输已移除）。
+async function loadAssembly(p) {
+  browseBtn.disabled = true;
   status('解析中…');
   try {
     const res = await parseAssembly(p, forceBox.checked);
@@ -691,9 +730,116 @@ form.addEventListener('submit', async (e) => {
       `${count} 实例 · ${res.cache_hit ? '缓存命中' : '新建缓存'}`,
     );
     refreshVersions();
+    pushRecent(p, 'assembly');
   } catch (err) {
-    status(`错误：${err.message}`, true);
+    const denied = err.message.includes('outside allowed dirs');
+    status(denied ? pathDeniedMsg() : `错误：${err.message}`, true);
   } finally {
-    loadBtn.disabled = false;
+    browseBtn.disabled = false;
   }
+}
+
+// ---- 文件上传 / 拖放 / 最近使用 ----
+// 上传是显式授权通道：用户亲手把文件交给服务（token 仍守门），落盘
+// workspace/uploads 后按扩展名路由到装配加载或图纸导入。
+const dropOverlay = $('#drop-overlay');
+const recentPanel = $('#recent-panel');
+const RECENT_KEY = 'cad_recent_files';
+const RECENT_MAX = 8;
+
+function loadRecent() {
+  try { return JSON.parse(localStorage.getItem(RECENT_KEY)) || []; }
+  catch { return []; }
+}
+
+function saveRecent(list) {
+  localStorage.setItem(RECENT_KEY, JSON.stringify(list));
+}
+
+function pushRecent(path, kind) {
+  const list = loadRecent().filter((r) => r.path !== path);
+  list.unshift({ path, kind, ts: Date.now() });
+  saveRecent(list.slice(0, RECENT_MAX));
+  renderRecent();
+}
+
+function routeByExtension(p) {
+  const ext = p.slice(p.lastIndexOf('.')).toLowerCase();
+  if (ext === '.dxf' || ext === '.dwg') {
+    drawingModal.classList.remove('hidden');
+    importDrawingFile(p);
+  } else {
+    drawingModal.classList.add('hidden');   // 切回装配视图时收起图纸弹窗
+    loadAssembly(p);
+  }
+}
+
+function renderRecent() {
+  const list = loadRecent();
+  recentPanel.classList.toggle('hidden', !list.length);
+  const el = $('#recent-list');
+  el.innerHTML = '';
+  list.forEach((r) => {
+    const row = document.createElement('div');
+    row.className = 'recent-row';
+    row.title = r.path;
+    const badge = document.createElement('span');
+    badge.className = `recent-badge ${r.kind}`;
+    badge.textContent = r.kind === 'drawing' ? '图纸' : '装配';
+    const name = document.createElement('span');
+    name.className = 'recent-name';
+    name.textContent = r.path;
+    row.append(badge, name);
+    row.addEventListener('click', () => routeByExtension(r.path));
+    el.append(row);
+  });
+}
+
+$('#recent-clear').addEventListener('click', () => {
+  saveRecent([]);
+  renderRecent();
 });
+
+async function handleUpload(file) {
+  status(`上传中… ${file.name}`);
+  try {
+    const res = await uploadFile(file);
+    routeByExtension(res.path);
+  } catch (err) {
+    status(`上传失败：${err.message}`, true);
+  }
+}
+
+$('#btn-browse').addEventListener('click', () => $('#file-input').click());
+$('#file-input').addEventListener('change', (e) => {
+  const f = e.target.files[0];
+  e.target.value = '';               // 同一文件可重复选择
+  if (f) handleUpload(f);
+});
+
+// 全窗口拖放：dragenter 计数防子元素抖动
+let dragDepth = 0;
+window.addEventListener('dragenter', (e) => {
+  e.preventDefault();
+  dragDepth += 1;
+  dropOverlay.classList.remove('hidden');
+});
+window.addEventListener('dragover', (e) => e.preventDefault());
+window.addEventListener('dragleave', () => {
+  dragDepth = Math.max(0, dragDepth - 1);
+  if (!dragDepth) dropOverlay.classList.add('hidden');
+});
+window.addEventListener('drop', (e) => {
+  e.preventDefault();
+  dragDepth = 0;
+  dropOverlay.classList.add('hidden');
+  const f = e.dataTransfer?.files[0];
+  if (f) handleUpload(f);
+});
+
+renderRecent();
+
+// ---- agent 预览链接消费：?load=<path>（顶部已提取并从 URL 清除）----
+// agent 在对话里给出 /app?token=...&load=<encodeURIComponent(路径)>，
+// 用户点击即加载；路径仍受服务端 safe_input_path 权威校验。
+if (bootLoadPath) routeByExtension(bootLoadPath);

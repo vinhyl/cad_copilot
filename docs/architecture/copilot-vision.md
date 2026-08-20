@@ -186,11 +186,16 @@
 ```text
 workspace/
 ├── raw_inputs/                  # [只读] 原始 STEP 与 DWG 文件
+├── uploads/                     # [显式授权] 上传通道落盘区（内容寻址）
+│   └── <sha256>/<文件名>        # 同内容重复上传去重回路径
 ├── cache/                       # [自动生成] Web 端快速加载缓存区
 │   ├── tree_structure.json      # 原始装配树与初始 4x4 矩阵
 │   ├── dwg_converted.dxf        # ODA 转换后的中间 DXF
 │   ├── dwg_view.svg             # 2D 网页交互矢量图
 │   └── gltf_library/            # 解耦后的所有子零件初始 glTF
+├── drawings/                    # [自动生成] 图纸缓存（键 = 源文件 sha 前缀）
+├── fea/                         # [自动生成] FEA 结果缓存（应力云图等）
+├── render/                      # [自动生成] Blender 渲染产物
 └── versions/                    # [增量时光机] 版本历史节点
     ├── v1.0_original/           # 初始版本元数据
     └── v1.1_add_stiffener/      # 修改节点 1
@@ -204,6 +209,10 @@ workspace/
 > ⚠ 已修订（ADR-0002 D10）：版本节点升级为"一致性文件族"——含 step/gltf/matrix
 > + `metadata.json` + `drawing.dwg` + changelog，原子提交，历史版本 DWG 永不重写；
 > 另见 R6（崩溃恢复）、R8（缓存失效键 = 源文件 SHA-256）。
+> ⚠ 已修订（2026-08-20，输入通道）：`raw_inputs/` 让位于 **uploads 内容寻址
+> 上传通道**（显式授权，见 ADR-0002 延续约束一演进节）——前端路径手输移除，
+> 上传 / 拖放 / 最近使用 / agent `?load=` URL 参数为输入入口；drawings/fea/
+> render 为 D5/D6/D7 落地新增的产物目录。
 
 ### 缓存与版本机制逻辑
 

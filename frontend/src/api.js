@@ -61,6 +61,28 @@ export async function getPlugins() {
   return body;
 }
 
+// 可访问目录（UI 引导：输入路径需位于其中之一）
+export async function getConfig() {
+  const r = await fetch('/api/config', {
+    headers: { Authorization: `Bearer ${getToken()}` },
+  });
+  const body = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(body.error || `HTTP ${r.status}`);
+  return body;
+}
+
+/** 上传文件（显式授权通道）：原始体 POST，文件名走 ?name=，返回服务端落盘路径。 */
+export async function uploadFile(file) {
+  const r = await fetch(`/api/upload?name=${encodeURIComponent(file.name)}`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${getToken()}` },
+    body: file,
+  });
+  const body = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(body.error || `HTTP ${r.status}`);
+  return body;
+}
+
 /** R5 异步 FEA：202 + {job_id, url}，轮询 getJob。 */
 export function startFeaJob(cacheKey, templateId, spec = {}) {
   return _post('/api/fea/static', {

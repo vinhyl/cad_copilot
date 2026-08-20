@@ -32,6 +32,7 @@ Run:
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import secrets
@@ -65,6 +66,18 @@ _MIME = {
 }
 
 
+class _UploadTooLarge(Exception):
+    """Internal: upload body exceeded _MAX_UPLOAD_BYTES."""
+
+
+def _silent_remove(path: str) -> None:
+    """Best-effort delete; missing file or locked file is not an error."""
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+
+
 # --------------------------------------------------------------------------
 # App factory
 # --------------------------------------------------------------------------
@@ -79,7 +92,8 @@ def create_app(token: str | None = None,
         token: bearer token guarding the API. Default: CAD_SERVICE_TOKEN env
             or a fresh random token (printed when run as __main__).
         allowed_dirs: dirs user-supplied input paths may live in.
-            Default: CAD_SERVICE_ALLOWED_DIRS env or the cwd.
+            Default: CAD_SERVICE_ALLOWED_DIRS env or the cwd. The
+            workspace/uploads dir is always appended (upload landing zone).
         workspace: root for cache output. Default: CAD_SERVICE_WORKSPACE
             env or ./workspace.
         frontend_dir: built SPA directory served at /app/. Default:
@@ -96,6 +110,14 @@ def create_app(token: str | None = None,
         workspace or os.environ.get("CAD_SERVICE_WORKSPACE", "workspace"))
     cache_root = os.path.join(workspace, "cache")
     os.makedirs(cache_root, exist_ok=True)
+    # Uploads (explicit-grant input channel): user hands a specific file to
+    # the service, so the uploads dir is appended to allowed_dirs. Uploads
+    # are content-addressed (uploads/<sha256>/<name>) -- identical re-uploads
+    # dedupe to the same path; different content never shares a dir (ODA
+    # converts whole src dirs).
+    uploads_root = os.path.join(workspace, "uploads")
+    os.makedirs(uploads_root, exist_ok=True)
+    allowed_dirs = allowed_dirs + [uploads_root]
     frontend_dir = os.path.realpath(
         frontend_dir or os.environ.get("CAD_SERVICE_FRONTEND_DIR",
                                        DEFAULT_FRONTEND_DIR))
@@ -175,6 +197,75 @@ def create_app(token: str | None = None,
     async def health(request):
         return JSONResponse({"status": "ok", "service": "cad-copilot",
                              "schema_version": cad_assembly.SCHEMA_VERSION})
+
+    async def config(request):
+        """UI guidance: which dirs user-supplied input paths may live in."""
+        try:
+            check_auth(request)
+        except PermissionError as e:
+            return JSONResponse({"error": str(e)}, status_code=401)
+        return JSONResponse({"allowed_dirs": allowed_dirs})
+
+    _UPLOAD_EXTS = {".step", ".stp", ".dxf", ".dwg"}
+    _MAX_UPLOAD_BYTES = 1 << 30  # 1 GiB
+
+    async def upload(request):
+        """Explicit-grant input channel: raw body -> workspace/uploads.
+
+        Content-addressed (mirrors the parse cache): stream to a temp file
+        while hashing, then land at ``uploads/<sha256>/<name>``. Re-uploading
+        identical content+name returns the SAME path (deduplicated=true) --
+        no new dir, and the frontend recent-list path dedup kicks in.
+        Filename comes from the ?name= query param (URL-decoded); it is
+        stripped to a basename and sanitized. Different content gets a
+        different hash dir (ODA converts whole source dirs, so unrelated DWGs
+        never share one). Returns {"path"} that existing parse/import
+        endpoints accept.
+        """
+        try:
+            check_auth(request)
+        except PermissionError as e:
+            return JSONResponse({"error": str(e)}, status_code=401)
+        raw = request.query_params.get("name", "")
+        base = os.path.basename(raw.replace("\\", "/"))
+        ext = os.path.splitext(base)[1].lower()
+        if ext not in _UPLOAD_EXTS:
+            return JSONResponse(
+                {"error": f"不支持的文件类型 {ext or '(无扩展名)'}："
+                          "仅支持 STEP / DXF / DWG"}, status_code=400)
+        safe = "".join(c for c in base if c not in '<>:"/\\|?*\x00-\x1f').strip()
+        if not safe:
+            safe = "upload" + ext
+        tmp_dir = os.path.join(uploads_root, ".tmp")
+        os.makedirs(tmp_dir, exist_ok=True)
+        tmp = os.path.join(tmp_dir, secrets.token_hex(8) + ext)
+        h = hashlib.sha256()
+        size = 0
+        try:
+            with open(tmp, "wb") as f:
+                async for chunk in request.stream():
+                    size += len(chunk)
+                    if size > _MAX_UPLOAD_BYTES:
+                        raise _UploadTooLarge
+                    h.update(chunk)
+                    f.write(chunk)
+        except _UploadTooLarge:
+            _silent_remove(tmp)
+            return JSONResponse({"error": "文件超过 1 GiB 上限"},
+                                status_code=413)
+        except OSError as e:
+            _silent_remove(tmp)
+            return JSONResponse({"error": f"写入失败: {e}"}, status_code=500)
+        dest_dir = os.path.join(uploads_root, h.hexdigest())
+        os.makedirs(dest_dir, exist_ok=True)
+        dest = os.path.join(dest_dir, safe)
+        deduplicated = os.path.isfile(dest)
+        if deduplicated:
+            _silent_remove(tmp)          # identical bytes already on disk
+        else:
+            os.replace(tmp, dest)        # atomic move into place
+        return JSONResponse({"path": dest, "name": safe, "size": size,
+                             "deduplicated": deduplicated})
 
     async def parse(request):
         try:
@@ -769,6 +860,8 @@ def create_app(token: str | None = None,
 
     app = Starlette(routes=[
         Route("/health", health, methods=["GET"]),
+        Route("/api/config", config, methods=["GET"]),
+        Route("/api/upload", upload, methods=["POST"]),
         Route("/api/assembly/parse", parse, methods=["POST"]),
         Route("/api/assembly/edit", edit, methods=["POST"]),
         Route("/api/assembly/audit", audit, methods=["GET"]),

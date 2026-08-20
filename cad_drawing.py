@@ -27,10 +27,13 @@ import subprocess
 import ezdxf
 
 # --- ODA File Converter probe paths (D5) -------------------------------
+# Resolution order (mirrors cad_fea / cad_render): env override ->
+# well-known install dirs (glob any version, e.g. "ODAFileConverter 27.1.0").
+_ODA_WIN_DIRS = [
+    r"C:\Program Files\ODA",
+    r"C:\Program Files (x86)\ODA",
+]
 _ODA_CANDIDATES = [
-    r"C:\Program Files\ODA\ODAFileConverter 25\ODAFileConverter.exe",
-    r"C:\Program Files\ODA\ODAFileConverter 24\ODAFileConverter.exe",
-    r"C:\Program Files\ODA\ODAFileConverter 23\ODAFileConverter.exe",
     "/usr/bin/ODAFileConverter",
     "/usr/local/bin/ODAFileConverter",
     "/opt/ODAFileConverter/ODAFileConverter",
@@ -47,7 +50,21 @@ class DrawingError(RuntimeError):
 
 
 def probe_oda_converter() -> str | None:
-    """Return the ODA File Converter executable path, or None."""
+    """Return the ODA File Converter executable path, or None.
+
+    D5: 默认开启、探测降级。Resolution: CAD_ODA_EXE env -> well-known
+    Windows install dirs (any version, newest first) -> unix paths.
+    """
+    import glob
+
+    env = os.environ.get("CAD_ODA_EXE")
+    if env and os.path.isfile(env):
+        return env
+    for base in _ODA_WIN_DIRS:
+        hits = glob.glob(os.path.join(base, "ODAFileConverter*",
+                                      "ODAFileConverter.exe"))
+        if hits:
+            return max(hits)  # newest version sorts last lexically
     for p in _ODA_CANDIDATES:
         if os.path.isfile(p):
             return p
@@ -60,13 +77,17 @@ def _dwg_to_dxf(dwg_path: str, out_dir: str) -> str:
     if oda is None:
         raise DrawingError(
             "DWG 输入需要 ODA File Converter（未在常见安装路径找到）。"
-            "请安装 ODA（免费）或将图纸另存为 DXF。DXF 输入无需任何外部工具。")
+            "请安装 ODA（免费）或将图纸另存为 DXF；已安装时可用环境变量 "
+            "CAD_ODA_EXE 指定路径。DXF 输入无需任何外部工具。")
     os.makedirs(out_dir, exist_ok=True)
     # ODA CLI: ODAFileConverter <src_dir> <out_dir> <version> <type> <recurse>
-    #   version: ACAD9..ACAD2018; type: DXF/DWG/DXB; recurse 0/1
+    #   <audit> [<filter>]
+    #   version: ACAD9..ACAD2018; type: DXF/DWG/DXB; recurse/audit: 0/1
+    #   filter MUST be a glob like *.DWG -- a non-glob value (e.g. "0")
+    #   matches nothing and ODA pops "no matched files in input folder".
     src_dir = os.path.dirname(os.path.abspath(dwg_path)) or "."
     r = subprocess.run(
-        [oda, src_dir, out_dir, "ACAD2018", "DXF", "0", "*", "0"],
+        [oda, src_dir, out_dir, "ACAD2018", "DXF", "0", "0", "*.DWG"],
         capture_output=True, timeout=120)
     base = os.path.splitext(os.path.basename(dwg_path))[0]
     dxf = os.path.join(out_dir, base + ".dxf")

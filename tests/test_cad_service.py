@@ -60,6 +60,93 @@ def test_health_no_auth_needed(client):
     assert r.json()["status"] == "ok"
 
 
+def test_config_exposes_allowed_dirs(client, tmp_path):
+    """UI guidance contract: /api/config lists allowed dirs (auth'd)."""
+    r = client.get("/api/config")
+    assert r.status_code == 401                      # token required
+    r = client.get("/api/config", headers=_hdr())
+    assert r.status_code == 200
+    dirs = r.json()["allowed_dirs"]
+    assert isinstance(dirs, list) and dirs           # at least cwd default
+    assert all(os.path.isabs(d) for d in dirs)
+
+
+# --------------------------------------------------------------------------
+# Upload (explicit-grant input channel)
+# --------------------------------------------------------------------------
+
+def test_upload_requires_token(client):
+    r = client.post("/api/upload?name=a.step", content=b"x")
+    assert r.status_code == 401
+
+
+def test_upload_roundtrip_and_parseable_path(client):
+    """Upload lands under workspace/uploads (own subdir), bytes intact,
+    and the returned path passes the parse endpoint's path confinement."""
+    data = b"fake step bytes" * 100
+    r = client.post("/api/upload?name=pump.step", content=data, headers=_hdr())
+    assert r.status_code == 200
+    body = r.json()
+    assert body["name"] == "pump.step"
+    assert body["size"] == len(data)
+    assert os.path.basename(body["path"]) == "pump.step"
+    uploads = os.path.join(os.path.dirname(os.path.dirname(body["path"])),
+                           os.path.basename(os.path.dirname(body["path"])))
+    with open(body["path"], "rb") as f:
+        assert f.read() == data
+    # every upload gets its own subdir (ODA converts whole src dirs)
+    assert os.path.basename(os.path.dirname(body["path"])) != "uploads"
+    # returned path is accepted by safe_input_path (not 401/403);
+    # invalid STEP content fails later with a different status.
+    r2 = client.post("/api/assembly/parse",
+                     json={"input_path": body["path"]}, headers=_hdr())
+    assert r2.status_code not in (401, 403)
+
+
+def test_upload_rejects_unsupported_ext(client):
+    r = client.post("/api/upload?name=virus.exe", content=b"x", headers=_hdr())
+    assert r.status_code == 400
+    assert "STEP" in r.json()["error"]
+
+
+def test_upload_sanitizes_traversal_filenames(client):
+    """Name with directories/forbidden chars is stripped to a safe basename
+    and confined under uploads (no escape)."""
+    r = client.post("/api/upload",
+                    params={"name": "..\\..\\evil<>.step"},
+                    content=b"x", headers=_hdr())
+    assert r.status_code == 200
+    path = r.json()["path"]
+    real = os.path.realpath(path)
+    assert os.path.basename(real) == "evil.step"     # dirs + <> stripped
+    assert real.startswith(os.path.join(
+        os.path.dirname(real), "..")) is False       # stays put
+    # confinement: parent-of-parent chain reaches uploads root
+    assert os.path.basename(os.path.dirname(os.path.dirname(real))) == "uploads"
+
+
+def test_upload_dedupes_identical_content(client):
+    """Content-addressed uploads: identical name+content re-upload returns
+    the SAME path (deduplicated=true) with no new file on disk; different
+    content gets a different path."""
+    data = b"same step bytes" * 50
+    r1 = client.post("/api/upload?name=a.step", content=data, headers=_hdr())
+    r2 = client.post("/api/upload?name=a.step", content=data, headers=_hdr())
+    assert r1.status_code == r2.status_code == 200
+    b1, b2 = r1.json(), r2.json()
+    assert b1["path"] == b2["path"]                  # stable path
+    assert b1["deduplicated"] is False
+    assert b2["deduplicated"] is True
+    uploads = os.path.dirname(os.path.dirname(b1["path"]))
+    files = [os.path.join(dp, f) for dp, _, fs in os.walk(uploads) for f in fs]
+    assert files == [b1["path"]]                     # exactly one copy
+    # different content -> different hash dir
+    r3 = client.post("/api/upload?name=a.step", content=b"changed" * 50,
+                     headers=_hdr())
+    assert r3.json()["path"] != b1["path"]
+    assert r3.json()["deduplicated"] is False
+
+
 def test_parse_requires_token(client, assembly_step, tmp_path):
     r = client.post("/api/assembly/parse",
                     json={"input_path": assembly_step})

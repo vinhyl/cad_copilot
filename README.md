@@ -94,14 +94,25 @@ venv/Scripts/python cad_service.py     # http://127.0.0.1:8764（token 启动时
 | 端点 | 说明 |
 |---|---|
 | `GET /health` | 健康检查（免鉴权，仅本机） |
+| `GET /api/config` | 启动配置（allowed_dirs，前端路径引导用） |
+| `POST /api/upload?name=` | **显式授权输入通道**：原始请求体 → 内容寻址落盘 `uploads/<sha256>/`（同内容去重回路径） |
 | `POST /api/assembly/parse` | 装配 STEP → manifest + 写缓存（Bearer token） |
 | `POST /api/assembly/edit` | **写操作**：模板编辑 → 干涉守门 → 原子版本提交（409 = 干涉拒绝） |
+| `GET /api/assembly/audit?cache_key=` | 一键体检：干涉 + DFM 规则（确定性计算） |
+| `POST /api/drawing/import` | 图纸导入：DXF 直读 / DWG 经 ODA 转换 + 语义提取 |
 | `GET /api/versions?cache_key=` | 版本列表（v0 基线 + v1..vN） |
 | `POST /api/versions/checkout` | 版本切换/回滚（指针切换，文件永不重写） |
+| `GET /api/plugins` | 插件探测（ODA / FreeCAD+ccx / Blender，可用性 + 缺失提示） |
+| `POST /api/fea/static` | FEA 静力学（`async:true` 走 job 模式，202 + job_id） |
+| `POST /api/render` | Blender 离线渲染（`async:true` 走 job 模式，202 + job_id） |
+| `GET /api/jobs[?kind=]` | R5 任务列表 |
+| `GET /api/jobs/{id}` | 任务状态轮询（phase / percent / detail） |
+| `POST /api/jobs/{id}/cancel` | 任务取消（协作式：terminate 钩子 + 幂等） |
 | `GET /cache/{key}/...` | 静态服务缓存产物（tree_structure.json / gltf_library，防目录穿越） |
 | `GET /versions/{key}/...` | 静态服务版本几何（防目录穿越） |
+| `GET /drawings/{key}/...` | 静态服务图纸 SVG（防目录穿越） |
 | `GET /app/` | Web 前端 SPA（`frontend/dist` 构建产物，见下节） |
-| `WS /ws?token=...` | JSON 协议骨架（ping / parse；任务队列与进度事件为后续增量） |
+| `WS /ws?token=...` | JSON 协议骨架（ping / parse）；长任务进度已由 R5 HTTP job 协议承接（上表 /api/jobs），WS 留作后续推送通道 |
 
 要点：缓存目录按源文件 **SHA-256 前 16 位** 命名——同内容重复导入直接命中
 （`cache_hit: true`），内容变化自动换键（R8/R17）；几何操作全局串行锁（R4）；
@@ -115,6 +126,27 @@ venv/Scripts/python cad_service.py     # http://127.0.0.1:8764（token 启动时
 SPA：加载装配 STEP → **Template+Matrix 实例化渲染**（每个唯一零件一份 glTF
 几何，全部实例共享 `InstancedMesh`，矩阵来自 manifest 的累积世界 4×4）+ 装配树 UI
 （选择层级双向联动：树上点选高亮 3D 实例 / 视口点选定位树上节点；按节点显隐）。
+
+**输入交互**（路径手输已移除，三条显式通道 + agent 入口）：
+
+- **「打开文件…」/ 拖放**：任意位置文件经 `POST /api/upload` 显式授权进入——
+  内容寻址落盘 `uploads/<sha256>/<文件名>`（重复上传去重回路径），前端按扩展名
+  自动路由（STEP → 装配加载；DXF/DWG → 图纸对照导入）
+- **最近使用**：localStorage 记录最近 8 个成功加载文件，点击重载（内容寻址缓存
+  命中秒开），与 uploads 路径去重联动
+- **agent 预览入口**：`/app?token=...&load=<encodeURIComponent(路径)>` 一次性
+  URL 参数——agent（内置浏览器 navigate 或生成链接）驱动加载，路径仍受服务端
+  `safe_input_path` 权威校验
+- 白名单外的路径（绕过前置校验时）：403 + 可操作文案（移入目录 / 设
+  `CAD_SERVICE_ALLOWED_DIRS`），`GET /api/config` 供前端展示可访问目录
+
+**插件状态面板（D5/D7 探测可视化）**：侧栏底部常驻 ODA / FEA / Blender 探测
+结果（绿点=可用、灰点=未安装，悬停显示路径或安装指引），↻ 即时重探测；
+缺依赖时对应功能给出明确降级提示，其余功能不受影响。
+
+**R5 任务卡片**：FEA / 渲染按钮触发异步 job（202 + job_id），右下角浮卡显示
+阶段中文映射 + 进度条（FEA 中继内层 FreeCAD 七阶段真实进度；渲染为不确定
+进度），支持取消（协作式终止）；FEA 完成出结果摘要，渲染完成弹大图。
 
 **Phase B 视图操作集**（视图状态 ≠ 数据状态，全部不落盘）：
 

@@ -5,6 +5,57 @@
 
 ## [未发布]
 
+### 新增 (Added)（文件输入交互：上传 / 拖放 / 最近使用）
+- **`POST /api/upload`（显式授权输入通道）**：原始请求体流式落盘
+  `workspace/uploads/`，**内容寻址**（流式 SHA-256 → `uploads/<hash>/
+  <文件名>`，与 parse 缓存同构）——同一文件重复上传返回**同一路径**
+  （`deduplicated: true`，不新增目录，前端最近使用按路径去重自然
+  生效）；不同内容落不同 hash 目录（ODA 按整目录转换，DWG 不混放）；
+  文件名取 `?name=` 参数，剥目录 + 净化 Windows 禁用字符；扩展名
+  白名单（STEP/DXF/DWG）+ 1 GiB 上限（流式检查，超限清理临时文件）；
+  uploads 目录自动注入 `allowed_dirs`，返回路径可直接喂给现有 parse /
+  drawing import 端点。安全语义：用户亲手把文件交给服务 = 显式授权，
+  token 仍守门。
+- **前端上传交互**：加载表单"浏览文件…"按钮（原生文件选择器）；全窗口
+  拖放（dragenter 计数防抖 + 虚线覆盖层提示）；上传后按扩展名自动路由
+  ——`.step/.stp` 进装配加载，`.dxf/.dwg` 打开图纸对照并导入。
+- **导入 UI 重构（路径手输移除）**：上传 / 拖放 / 最近使用成为唯一输入
+  通道后，移除路径输入框、"加载"按钮与"可访问目录"常驻提示（白名单
+  403 兜底文案保留）；"打开文件…"升级为主按钮；图纸对照弹窗补"浏览
+  文件…"按钮（与主窗口共用一个文件选择器，按扩展名路由）。
+- **修复：上传 DWG/DXF 后侧栏状态停留在"上传中"**——图纸导入原先只
+  更新弹窗内 msg，现在 `importDrawingFile` 同时更新侧栏主状态栏（成功
+  摘要 / 失败原因），装配加载同样收敛为直调函数 `loadAssembly`。
+- **`?load=` URL 参数（agent 驱动预览入口）**：`/app?token=...&load=<
+  encodeURIComponent(路径)>` 一次性消费——前端按扩展名自动路由装配/
+  图纸，路径仍受服务端 safe_input_path 权威校验。agent 对话流（"预览
+  这个 STEP"）由此闭环：shell 启动服务 → 构造可点击链接 → 用户浏览器
+  直接渲染。顺带修复 URL 参数清理丢 `?` 的潜在 bug（多参数时拼成
+  `/appload=x`）。
+- **前端最近使用**：localStorage 记录最近 8 个成功加载的文件（装配/
+  图纸徽标区分，长路径 rtl 截断保留文件名可见），点击一键重载（内容
+  寻址缓存命中时秒开），可清空。
+- **测试（+5）**：上传鉴权 / 字节级落盘往返 + 返回路径通过 parse 端点
+  路径围栏 / 非法扩展名 400 / 文件名穿越净化。
+
+### 修复 (Fixed)（ODA 探测与调用）
+- **探测漏检新版本**：`probe_oda_converter` 从硬编码 23/24/25 三个精确
+  路径改为 glob 任意版本目录（`ODAFileConverter*\ODAFileConverter.exe`，
+  多版本取最新），补 `C:\Program Files (x86)\ODA`，新增 `CAD_ODA_EXE`
+  环境变量覆盖（与 FreeCAD/Blender 探测约定一致）。
+- **DWG 转换必失败**：ODA CLI 参数顺序传错——filter 位传了 `"0"`，
+  匹配不到任何文件并弹窗 "no matched files in input folder"。修正为
+  `<src> <out> <ver> <type> <recurse> <audit> <filter>` 即
+  `... "ACAD2018" "DXF" "0" "0" "*.DWG"`，并加回归测试钉死参数顺序。
+
+### 新增 (Added)（路径白名单 UI 引导）
+- **`GET /api/config`**：返回 `allowed_dirs`（token 守门），供前端展示
+  可访问目录边界。
+- **前端三层引导**：加载表单下常驻"可访问目录"提示（悬停列出全部）；
+  提交前即时校验白名单外的路径（不发请求直接提示）；服务端 403 的
+  `path outside allowed dirs` 映射为可操作文案（移入目录 / 设置
+  `CAD_SERVICE_ALLOWED_DIRS`）。图纸导入入口同样接入。
+
 ### 新增 (Added)（R5 任务协议 + 前端插件状态 UI）
 - **`cad_jobs.py` JobManager（R5 长任务异步）**：内存任务注册表——
   `submit(kind, fn)` 立即返回 job id，工作线程执行；`ctx.report(phase,

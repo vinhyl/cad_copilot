@@ -91,6 +91,33 @@ def test_dwg_without_oda_degrades_clearly(tmp_path):
             cad_drawing.import_drawing(str(dwg), str(tmp_path / "c"))
 
 
+def test_dwg_to_dxf_cli_arg_order(tmp_path, monkeypatch):
+    """Regression: ODA CLI is <src> <out> <ver> <type> <recurse> <audit>
+    <filter>. Wrong order put "0" in the filter slot -> ODA pops
+    "no matched files in input folder"."""
+    dwg = tmp_path / "part.dwg"
+    dwg.write_bytes(b"fake")
+    seen = {}
+
+    def fake_run(cmd, **kw):
+        seen["cmd"] = cmd
+        # emulate ODA: writes the converted dxf into the output dir
+        with open(os.path.join(cmd[2], "part.dxf"), "wb") as f:
+            f.write(b"dxf")
+
+        class R:
+            returncode = 0
+        return R()
+
+    monkeypatch.setattr(cad_drawing, "probe_oda_converter",
+                        lambda: r"C:\fake\ODAFileConverter.exe")
+    monkeypatch.setattr(cad_drawing.subprocess, "run", fake_run)
+    dxf = cad_drawing._dwg_to_dxf(str(dwg), str(tmp_path / "out"))
+    assert dxf.endswith("part.dxf")
+    # oda, src_dir, out_dir, then the five option slots
+    assert seen["cmd"][3:] == ["ACAD2018", "DXF", "0", "0", "*.DWG"]
+
+
 def test_svg_entity_limit(tmp_path):
     """Pathological files (audit M4-style) are truncated, not exploded."""
     doc = ezdxf.new("R2010")

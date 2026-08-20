@@ -4,21 +4,28 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>CAD Copilot</title>
-    <script type="module" crossorigin src="/app/assets/index-B-Gx5gG-.js"></script>
-    <link rel="stylesheet" crossorigin href="/app/assets/index-BDz-dlE2.css">
+    <script type="module" crossorigin src="/app/assets/index-CVvUR4i_.js"></script>
+    <link rel="stylesheet" crossorigin href="/app/assets/index-QNF85JRm.css">
   </head>
   <body>
     <div id="app">
       <aside id="sidebar">
         <h1>CAD Copilot</h1>
-        <form id="load-form">
-          <input id="path-input" placeholder="装配体 STEP 路径（服务端可见）" autocomplete="off" />
+        <div id="load-form">
+          <button type="button" id="btn-browse" title="从本机任意位置选择文件（STEP / DXF / DWG），也可直接拖入窗口">打开文件…</button>
           <label class="force-row" title="忽略缓存键，强制重新解析并重建缓存">
             <input type="checkbox" id="force" /> 强制重建缓存
           </label>
-          <button type="submit" id="load-btn">加载</button>
-        </form>
-        <div id="status" class="idle">输入路径并加载</div>
+          <input type="file" id="file-input" accept=".step,.stp,.dxf,.dwg" hidden />
+        </div>
+        <div id="status" class="idle">浏览或拖入文件加载（STEP / DXF / DWG）</div>
+        <div id="recent-panel" class="hidden">
+          <div class="fp-head">
+            <span>最近使用</span>
+            <button id="recent-clear" title="清空记录">×</button>
+          </div>
+          <div id="recent-list"></div>
+        </div>
         <div id="tree"></div>
         <div id="edit-panel" class="hidden">
           <div class="fp-head">
@@ -126,9 +133,8 @@
           </div>
           <div id="drawing-body">
             <div id="drawing-form">
-              <input id="drawing-path" placeholder="DXF / DWG 路径（服务端可见）" />
-              <button id="drawing-load">导入</button>
-              <span id="drawing-msg"></span>
+              <button id="drawing-browse" title="选择 DXF / DWG 文件">浏览文件…</button>
+              <span id="drawing-msg">或将文件拖入主窗口</span>
             </div>
             <div id="drawing-split">
               <div id="drawing-view"></div>
@@ -161,6 +167,9 @@
           <div id="job-result"></div>
         </div>
       </div>
+    </div>
+    <div id="drop-overlay" class="hidden">
+      <div class="drop-msg">松开以加载文件（STEP / DXF / DWG）</div>
     </div>
   </body>
 </html>

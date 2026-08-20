@@ -300,6 +300,16 @@ Blender headless 渲染为可选插件；FEA 先做 CalculiX 静力学单场景�
 - **保留**：`CAD_MCP_ALLOWED_DIRS` 路径白名单、`build123d_model` 默认禁用 +
   超时沙箱子进程、HTML 生成统一转义、vendor SHA-256 校验（缺文件即报错不静默联网）；
 - **新增**：Web 服务仅绑定 127.0.0.1、本地 token 鉴权、CORS 收紧。
+- **演进（2026-08-20，输入通道决策）**：白名单语义 = "字符串路径尝试读"，
+  只防意外不构成授权；用户亲手交付文件 = **显式授权**，语义不同——
+  `POST /api/upload`（原始请求体流式落盘，文件名仅取 basename + 净化）与
+  白名单并行，uploads 目录自动加入 allowed_dirs。上传**内容寻址**
+  （`uploads/<sha256>/<文件名>`）：同一文件重复上传去重回路径（与 parse
+  缓存同构），不同内容分目录（ODA 按整目录转换，DWG 不混放）。前端由此
+  移除路径手输（上传 / 拖放 / 最近使用为唯一输入通道）；agent 预览走
+  `/app?load=<encodeURIComponent(路径)>` 一次性 URL 参数，**路径仍受
+  `safe_input_path` 权威校验**——agent 无法借该入口越权读白名单外文件
+  （越权时 403 + 可操作文案）。
 
 ## 延续约束二：工程纪律
 
