@@ -1,4 +1,4 @@
-"""Shared pytest fixtures for the cad_tools test-suite (Phase 3 / TE1).
+"""Shared pytest fixtures for the cad_copilot test-suite (Phase 3 / TE1).
 
 Provides:
   * repository-root resolution + sys.path injection so the top-level modules

@@ -1,4 +1,4 @@
-# CAD 工具链 (cad_tools)
+# CAD Copilot (cad_copilot)
 
 > 版本：**v0.1.0** — 变更记录见 [CHANGELOG.md](CHANGELOG.md)
 

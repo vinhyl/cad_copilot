@@ -6,14 +6,14 @@
 > **关联**：
 > - 扩展设想：[copilot-vision.md](../architecture/copilot-vision.md)（原仓库根 `设想.txt`，2026-08-19 迁入并首次纳入版本库）
 > - 现状基线：v0.1.1（见 [CHANGELOG.md](../../CHANGELOG.md)、[README.md](../../README.md)）
-> - 工程审计：[full-audit-cad-tools-2026-08-16.md](../../deliverables/engineering-assurance/full-audit-cad-tools-2026-08-16.md)
+> - 工程审计：[full-audit-cad-copilot-2026-08-16.md](../../deliverables/engineering-assurance/full-audit-cad-copilot-2026-08-16.md)
 > - 前置决策：[0001-ocp-vs-freecad-base.md](0001-ocp-vs-freecad-base.md)（OCP 轻量底座 + 按需叠加路线，原 `comparison.md`）
 
 ---
 
 ## 1. 背景与总体判断
 
-cad_tools v0.1.1 已具备：OCP 几何内核封装（读 / 属性 / mesh 单一实现）、特征分类与拾取
+cad_copilot v0.1.1 已具备：OCP 几何内核封装（读 / 属性 / mesh 单一实现）、特征分类与拾取
 （feature_locator / feature_picker）、MCP 8 工具（docstring 即 Agent 契约）、安全加固
 （路径白名单、build123d 默认禁用、XSS 转义、vendor SHA-256 校验）、46 个 pytest 用例 +
 三平台 CI 矩阵。

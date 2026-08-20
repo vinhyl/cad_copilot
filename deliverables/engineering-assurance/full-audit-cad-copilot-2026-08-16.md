@@ -1,9 +1,9 @@
-# cad_tools 全面工程审查报告
+# cad_copilot 全面工程审查报告
 
 **日期**：2026-08-16
 **工作流**：工作流 1（全面代码审查）+ 架构评估 + 测试覆盖评估 + 文档评估
 **参与成员**：Cody（代码审查师）/ Archi（系统架构师）/ Tessa（测试专家）/ Docu（技术文档师）
-**审查对象**：`C:\Users\vince\Documents\ai projects\cad_tools`（离线 CAD 特征拾取/预览工具链，Python 3.13 + OCP/build123d + FastMCP + three.js）
+**审查对象**：`C:\Users\vince\Documents\ai projects\cad_copilot`（离线 CAD 特征拾取/预览工具链，Python 3.13 + OCP/build123d + FastMCP + three.js）
 
 ---
 

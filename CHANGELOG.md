@@ -273,7 +273,7 @@
 
 ## [v0.1.0] — 2026-08-16
 
-工程保障团队对 `cad_tools` 的全链路审查（Phase 0–4）修复收口基线。
+工程保障团队对 `cad_copilot` 的全链路审查（Phase 0–4）修复收口基线。
 
 ### 安全 (Security)
 - **RCE 面治理**：`build123d_model` 默认禁用，仅当 `CAD_MCP_ALLOW_BUILD123D=1` 时启用；
