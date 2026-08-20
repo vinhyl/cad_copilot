@@ -414,7 +414,11 @@ def build_freecad_script(step_path: str, out_dir: str, spec: dict,
 
 def build_command(freecad_exe: str, script_path: str) -> list:
     """freecadcmd <script>; the GUI binary needs --console (D6 headless)."""
-    if os.path.basename(freecad_exe).lower() in ("freecad.exe", "freecad"):
+    # os.path.basename is platform-dependent (POSIX ignores '\\'), but the
+    # exe path may be a Windows-style path regardless of host OS -- split on
+    # BOTH separators so the GUI-binary check works in the 3-platform CI matrix.
+    base = freecad_exe.replace("\\", "/").rsplit("/", 1)[-1].lower()
+    if base in ("freecad.exe", "freecad"):
         return [freecad_exe, "--console", script_path]
     return [freecad_exe, script_path]
 
