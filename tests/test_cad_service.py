@@ -230,3 +230,195 @@ def test_app_traversal_no_source_leak(client):
         r = client.get(probe)
         assert r.status_code in (200, 403, 404)
         assert "def create_app" not in r.text  # never leak server source
+
+
+# --------------------------------------------------------------------------
+# Phase D optional plugins (D7): /api/plugins + FEA + render
+# --------------------------------------------------------------------------
+
+import cad_fea   # noqa: E402
+import cad_render   # noqa: E402
+
+
+def _fea_status(available):
+    missing = [] if available else ["FreeCAD", "CalculiX (ccx)"]
+    return {"freecad": "fc" if available else None,
+            "calculix": "ccx" if available else None,
+            "available": available, "missing": missing,
+            "hint": None if available else cad_fea.HINT}
+
+
+def _render_status(available):
+    return {"blender": "bl" if available else None,
+            "available": available,
+            "missing": [] if available else ["Blender"],
+            "hint": None if available else cad_render.HINT}
+
+
+def test_plugins_requires_token(client):
+    r = client.get("/api/plugins")
+    assert r.status_code == 401
+
+
+def test_plugins_probe_structure(client, monkeypatch):
+    monkeypatch.setattr(cad_fea, "fea_status", lambda: _fea_status(False))
+    monkeypatch.setattr(cad_render, "render_status",
+                        lambda: _render_status(False))
+    r = client.get("/api/plugins", headers=_hdr())
+    assert r.status_code == 200
+    body = r.json()
+    assert set(body) == {"oda", "fea", "blender"}
+    assert body["fea"]["available"] is False
+    assert body["blender"]["available"] is False
+    assert isinstance(body["oda"]["available"], bool)
+
+
+def _cache_key_of(client, inputs, assembly_step):
+    _, body = _parse_ok(client, inputs, assembly_step)
+    return body["cache_key"]
+
+
+def test_fea_static_plugin_missing_503(client, assembly_step, tmp_path,
+                                       monkeypatch):
+    ck = _cache_key_of(client, str(tmp_path / "inputs"), assembly_step)
+    monkeypatch.setattr(cad_fea, "fea_status", lambda: _fea_status(False))
+    r = client.post("/api/fea/static",
+                    json={"cache_key": ck, "template_id": "t0"},
+                    headers=_hdr())
+    assert r.status_code == 503
+    body = r.json()
+    assert body["plugin"] == "fea" and body["kind"] == "missing"
+    assert body["missing"] == ["FreeCAD", "CalculiX (ccx)"]
+
+
+def test_fea_static_unknown_cache_404(client):
+    r = client.post("/api/fea/static",
+                    json={"cache_key": "deadbeefdeadbeef",
+                          "template_id": "t0"},
+                    headers=_hdr())
+    assert r.status_code == 404
+
+
+def test_fea_static_unknown_template_400(client, assembly_step, tmp_path,
+                                         monkeypatch):
+    ck = _cache_key_of(client, str(tmp_path / "inputs"), assembly_step)
+    monkeypatch.setattr(cad_fea, "fea_status", lambda: _fea_status(True))
+    r = client.post("/api/fea/static",
+                    json={"cache_key": ck, "template_id": "nope"},
+                    headers=_hdr())
+    assert r.status_code == 400
+
+
+def test_fea_static_timeout_504(client, assembly_step, tmp_path, monkeypatch):
+    ck = _cache_key_of(client, str(tmp_path / "inputs"), assembly_step)
+    monkeypatch.setattr(cad_fea, "fea_status", lambda: _fea_status(True))
+
+    def raise_timeout(*a, **k):
+        raise cad_fea.FEAError("solve timeout", kind="timeout")
+
+    monkeypatch.setattr(cad_fea, "run_static", raise_timeout)
+    r = client.post("/api/fea/static",
+                    json={"cache_key": ck, "template_id": "t0"},
+                    headers=_hdr())
+    assert r.status_code == 504
+
+
+def test_fea_static_ok_and_served(client, assembly_step, tmp_path, monkeypatch):
+    ck = _cache_key_of(client, str(tmp_path / "inputs"), assembly_step)
+    monkeypatch.setattr(cad_fea, "fea_status", lambda: _fea_status(True))
+    seen = {}
+
+    def fake_run_static(step_path, out_dir, spec=None, force=False):
+        seen["step"] = step_path
+        seen["spec"] = spec
+        os.makedirs(out_dir, exist_ok=True)
+        with open(os.path.join(out_dir, "result.json"), "w",
+                  encoding="utf-8") as f:
+            json.dump({"schema_version": 1, "ok": True, "cache_hit": False,
+                       "max_displacement_mm": 0.02}, f)
+        return {"schema_version": 1, "ok": True, "cache_hit": False,
+                "max_displacement_mm": 0.02}
+
+    monkeypatch.setattr(cad_fea, "run_static", fake_run_static)
+    r = client.post("/api/fea/static",
+                    json={"cache_key": ck, "template_id": "t0",
+                          "spec": {"force_N": 2500}},
+                    headers=_hdr())
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["ok"] is True
+    assert body["fea_key"] and len(body["fea_key"]) == 16
+    assert body["base_url"] == f"/fea/{body['fea_key']}"
+    assert seen["spec"] == {"force_N": 2500}
+    assert os.path.isfile(seen["step"])   # version-resolved baseline STEP
+    # result file is served back over HTTP
+    r2 = client.get(f"{body['base_url']}/result.json")
+    assert r2.status_code == 200
+
+
+def test_render_plugin_missing_503(client, assembly_step, tmp_path, monkeypatch):
+    ck = _cache_key_of(client, str(tmp_path / "inputs"), assembly_step)
+    monkeypatch.setattr(cad_render, "render_status",
+                        lambda: _render_status(False))
+    r = client.post("/api/render", json={"cache_key": ck}, headers=_hdr())
+    assert r.status_code == 503
+    body = r.json()
+    assert body["plugin"] == "render" and body["kind"] == "missing"
+
+
+def test_render_unknown_cache_404(client):
+    r = client.post("/api/render", json={"cache_key": "deadbeefdeadbeef"},
+                    headers=_hdr())
+    assert r.status_code == 404
+
+
+def test_render_ok_uses_real_entries_and_serves_png(client, assembly_step,
+                                                    tmp_path, monkeypatch):
+    """build_render_entries runs against the REAL parsed manifest (baseline
+    gltf resolution); only the Blender subprocess is stubbed."""
+    ck = _cache_key_of(client, str(tmp_path / "inputs"), assembly_step)
+    monkeypatch.setattr(cad_render, "render_status",
+                        lambda: _render_status(True))
+    seen = {}
+
+    def fake_scene(entries, out_dir, spec=None, force=False):
+        seen["entries"] = entries
+        os.makedirs(out_dir, exist_ok=True)
+        with open(os.path.join(out_dir, "render.png"), "wb") as f:
+            f.write(b"\x89PNG stub")
+        with open(os.path.join(out_dir, "result.json"), "w",
+                  encoding="utf-8") as f:
+            json.dump({"schema_version": 1, "ok": True, "engine": "CYCLES",
+                       "objects": 2, "cache_hit": False}, f)
+        return {"schema_version": 1, "ok": True, "engine": "CYCLES",
+                "objects": 2, "cache_hit": False}
+
+    monkeypatch.setattr(cad_render, "render_scene", fake_scene)
+    r = client.post("/api/render", json={"cache_key": ck,
+                                         "spec": {"samples": 32}},
+                    headers=_hdr())
+    assert r.status_code == 200, r.text
+    body = r.json()
+    # entries built from the real manifest: existing gltf files + instances
+    assert body["render_key"] and len(body["render_key"]) == 16
+    assert body["png_url"] == f"/render/{body['render_key']}/render.png"
+    assert seen["entries"]
+    for e in seen["entries"]:
+        assert os.path.isfile(e["gltf"])
+        assert e["instances"]
+    # the png is served with the right media type
+    r2 = client.get(body["png_url"])
+    assert r2.status_code == 200
+    assert r2.headers["content-type"].startswith("image/png")
+
+
+def test_render_traversal_rejected(client):
+    r = client.get("/render/../../cad_service.py")
+    assert r.status_code in (403, 404)
+    assert "def create_app" not in r.text
+
+
+def test_fea_traversal_rejected(client):
+    r = client.get("/fea/../../cad_service.py")
+    assert r.status_code in (403, 404)
+    assert "def create_app" not in r.text

@@ -16,6 +16,9 @@ previews/
 *.bak
 _frag_tmp.stl
 
+# ---- Local runtime workspace (R12: cache/versions/drawings/fea/render excluded) ----
+workspace/
+
 # ---- Dev / diagnostic scratch from dev session (root-level, underscore-prefixed) ----
 /_*
 

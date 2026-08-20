@@ -5,6 +5,36 @@
 
 ## [未发布]
 
+### 新增 (Added)（Phase D 插件框架：FEA / Blender 渲染，代码先行不装依赖）
+- **`cad_fea.py` FEA 插件框架（D6/D7）**：CalculiX 静力学单场景（轴向固定
+  底面 + 顶面受压），FreeCAD **headless 子进程隔离**（主进程永不 import
+  FreeCAD，GUI 二进制自动加 `--console`）；探测链 env（`CAD_FREECAD_EXE` /
+  `CAD_CCX_EXE`）→ PATH → 常见安装路径（ccx 优先找 FreeCAD 同目录捆绑版）；
+  缺依赖抛结构化 `FEAError`（missing/timeout/failure 三类）；生成脚本按
+  interpreter/geometry/faces/setup/mesh/solve/post **七阶段汇报进度**到
+  result.json；spec 规范化（力学参数 + 网格尺寸 + 超时钳制 [30,3600]s）；
+  结果缓存键 = STEP 内容 + 规范化 spec 的 sha256（R8）。
+- **`cad_render.py` Blender 渲染插件框架（D7/R9）**：装配体静止帧渲染——
+  按模板导入 glTF（导入一次 + linked 复制实例化），应用 manifest 3×4 世界
+  矩阵（与前端 scene.js 同约定），**glTF Y-up 修正**可开关（OCCT 写的是
+  CAD Z-up 坐标，Blender 导入器会施加 Y-up→Z-up 旋转需抵消）；自动相机
+  取景（方位角/仰角/距离系数）+ 太阳光 + 中性环境光；引擎 cycles(CPU
+  headless 安全)/workbench/eevee 带版本 ID 回退；Blender **仅作外部依赖
+  调用**（`--background --python`，不捆绑二进制规避 GPL 传染）；
+  渲染缓存键 = glTF 内容 + 实例矩阵 + spec 的 sha256（R8）。
+- **服务层插件端点（D5/D7 探测 + 优雅降级统一入口）**：`GET /api/plugins`
+  汇报 ODA / FreeCAD+ccx / Blender 探测结果（缺什么、装哪、其余功能不受
+  影响）；`POST /api/fea/static`（版本链解析模板 STEP → 求解，503 缺插件 /
+  504 超时 / 400 校验）；`POST /api/render`（版本链解析 gltf → 建渲染条目
+  → 出图，`png_url` 回传）；`/fea/` `/render/` 静态服务（路径逃逸防护）。
+  长任务 R5 job/progress 协议仍为后续增量（当前同步 + 钳制超时）。
+- **测试（57 个新增，全套 169 绿）**：两插件的外层框架全量覆盖——探测/env
+  覆盖、spec 规范化与拒绝、缓存键、生成脚本 compile + 载荷嵌入（含引号
+  路径健壮性）、命令构造（console/gui 二进制）、编排/缓存命中跳过子进程/
+  force 重算/超时映射/缺产物失败；服务端点契约（鉴权、503/504/404/400
+  映射、真实 manifest 条目构建、PNG 静态服务、路径穿越拒绝）。内层
+  FreeCAD/bpy 脚本待装依赖后首轮验证（阶段标记 + 部分结果已就绪）。
+
 ### 新增 (Added)（Phase C+/D：定点编辑 / DFM 体检 / DXF 校准 / evals runner）
 - **定点特征编辑（R1 落地）**：`apply_feature_edit`（hole_resize / boss_remove——
   从特征元数据构造定向布尔，"点哪个特征改哪个特征"）；`match_features`

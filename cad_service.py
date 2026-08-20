@@ -132,6 +132,24 @@ def create_app(token: str | None = None,
             raise PermissionError("drawings path escape")
         return rp
 
+    fea_root = os.path.join(workspace, "fea")
+    os.makedirs(fea_root, exist_ok=True)
+
+    def safe_fea_path(rest: str) -> str:
+        rp = os.path.realpath(os.path.join(fea_root, rest))
+        if not (rp == fea_root or rp.startswith(fea_root + os.sep)):
+            raise PermissionError("fea path escape")
+        return rp
+
+    render_root = os.path.join(workspace, "render")
+    os.makedirs(render_root, exist_ok=True)
+
+    def safe_render_path(rest: str) -> str:
+        rp = os.path.realpath(os.path.join(render_root, rest))
+        if not (rp == render_root or rp.startswith(render_root + os.sep)):
+            raise PermissionError("render path escape")
+        return rp
+
     def check_auth(request) -> None:
         supplied = (request.headers.get("authorization", "")
                     .removeprefix("Bearer ").strip()
@@ -462,6 +480,140 @@ def create_app(token: str | None = None,
             return JSONResponse({"error": "not found"}, status_code=404)
         return FileResponse(fp)
 
+    # ----------------------------------------------------------------------
+    # Phase D optional plugins (ADR-0002 D7): probe + FEA + render
+    # ----------------------------------------------------------------------
+
+    async def plugins(request):
+        """GET /api/plugins -- probe optional plugin dependencies (D5/D7):
+        ODA converter, FreeCAD+CalculiX (FEA), Blender (render)."""
+        try:
+            check_auth(request)
+        except PermissionError as e:
+            return JSONResponse({"error": str(e)}, status_code=401)
+        import cad_drawing
+        import cad_fea
+        import cad_render
+        oda = cad_drawing.probe_oda_converter()
+        return JSONResponse({
+            "oda": {"available": oda is not None, "path": oda},
+            "fea": cad_fea.fea_status(),
+            "blender": cad_render.render_status(),
+        })
+
+    async def fea_static(request):
+        """POST /api/fea/static -- D7 FEA plugin: CalculiX static single
+        scenario on a version-resolved template STEP (D6: FreeCAD runs as a
+        headless subprocess). Sync + clamped timeout; the R5 job/progress
+        protocol is a later increment."""
+        try:
+            check_auth(request)
+            body = json.loads(await request.body() or b"{}")
+            cache_key = str(body["cache_key"])
+            tid = str(body["template_id"])
+        except PermissionError as e:
+            return JSONResponse({"error": str(e)}, status_code=401
+                                if "token" in str(e) else 403)
+        except (KeyError, ValueError) as e:
+            return JSONResponse({"error": f"bad request: {e}"}, status_code=400)
+        try:
+            cache_dir, manifest = _edit_context(cache_key)
+        except KeyError as e:
+            return JSONResponse({"error": str(e)}, status_code=404)
+        if next((t for t in manifest["templates"] if t["id"] == tid), None) is None:
+            return JSONResponse(
+                {"error": f"unknown template_id: {tid}"}, status_code=400)
+
+        spec = body.get("spec") or {}
+        import cad_fea
+        try:
+            store = _store(cache_key)
+            step_path = store.resolve_step(
+                tid, baseline_step=os.path.join(cache_dir, "parts", f"{tid}.step"))
+            key = cad_fea.fea_cache_key(step_path, spec)
+            out_dir = os.path.join(fea_root, key)
+            result = cad_fea.run_static(step_path, out_dir, spec,
+                                        force=bool(body.get("force")))
+        except cad_fea.FEAError as e:
+            code = {"missing": 503, "timeout": 504}.get(e.kind, 422)
+            return JSONResponse({"ok": False, "error": str(e), "plugin": "fea",
+                                 "kind": e.kind, "missing": e.missing},
+                                status_code=code)
+        except ValueError as e:
+            return JSONResponse({"ok": False, "error": str(e),
+                                 "stage": "validation"}, status_code=400)
+        except FileNotFoundError as e:
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=404)
+        result["fea_key"] = key
+        result["base_url"] = f"/fea/{key}"
+        return JSONResponse(result)
+
+    async def render(request):
+        """POST /api/render -- D7 render plugin: Blender headless still of
+        the version-resolved assembly state (R9: external dependency, never
+        bundled). Sync + clamped timeout; R5 job/protocol later."""
+        try:
+            check_auth(request)
+            body = json.loads(await request.body() or b"{}")
+            cache_key = str(body["cache_key"])
+        except PermissionError as e:
+            return JSONResponse({"error": str(e)}, status_code=401
+                                if "token" in str(e) else 403)
+        except (KeyError, ValueError) as e:
+            return JSONResponse({"error": f"bad request: {e}"}, status_code=400)
+        try:
+            cache_dir, manifest = _edit_context(cache_key)
+        except KeyError as e:
+            return JSONResponse({"error": str(e)}, status_code=404)
+
+        spec = body.get("spec") or {}
+        import cad_render
+        try:
+            store = _store(cache_key)
+
+            def resolve_gltf_abs(tid: str) -> str | None:
+                vurl = store.resolve_gltf(tid)
+                if vurl:
+                    return os.path.join(workspace, vurl.lstrip("/"))
+                return os.path.join(cache_dir, "gltf_library", f"{tid}.gltf")
+
+            entries = cad_render.build_render_entries(manifest, resolve_gltf_abs)
+            key = cad_render.render_cache_key(entries, spec)
+            out_dir = os.path.join(render_root, key)
+            result = cad_render.render_scene(entries, out_dir, spec,
+                                             force=bool(body.get("force")))
+        except cad_render.RenderError as e:
+            code = {"missing": 503, "timeout": 504}.get(e.kind, 422)
+            return JSONResponse({"ok": False, "error": str(e),
+                                 "plugin": "render", "kind": e.kind,
+                                 "missing": e.missing}, status_code=code)
+        except ValueError as e:
+            return JSONResponse({"ok": False, "error": str(e),
+                                 "stage": "validation"}, status_code=400)
+        result["render_key"] = key
+        result["base_url"] = f"/render/{key}"
+        result["png_url"] = f"/render/{key}/render.png"
+        return JSONResponse(result)
+
+    async def fea_file(request):
+        try:
+            fp = safe_fea_path(request.path_params["rest"])
+        except PermissionError:
+            return JSONResponse({"error": "forbidden"}, status_code=403)
+        if not os.path.isfile(fp):
+            return JSONResponse({"error": "not found"}, status_code=404)
+        return FileResponse(fp)
+
+    async def render_file(request):
+        try:
+            fp = safe_render_path(request.path_params["rest"])
+        except PermissionError:
+            return JSONResponse({"error": "forbidden"}, status_code=403)
+        if not os.path.isfile(fp):
+            return JSONResponse({"error": "not found"}, status_code=404)
+        return FileResponse(
+            fp, media_type=_MIME.get(os.path.splitext(fp)[1].lower()))
+
     async def ws(websocket):
         """Minimal JSON protocol skeleton (full job/progress protocol is a
         later increment per R5/R13): {action: "ping"} | {action: "parse",
@@ -533,9 +685,14 @@ def create_app(token: str | None = None,
         Route("/api/drawing/import", drawing_import, methods=["POST"]),
         Route("/api/versions", versions_list, methods=["GET"]),
         Route("/api/versions/checkout", versions_checkout, methods=["POST"]),
+        Route("/api/plugins", plugins, methods=["GET"]),
+        Route("/api/fea/static", fea_static, methods=["POST"]),
+        Route("/api/render", render, methods=["POST"]),
         Route("/cache/{rest:path}", cache_file, methods=["GET"]),
         Route("/versions/{rest:path}", versions_file, methods=["GET"]),
         Route("/drawings/{rest:path}", drawings_file, methods=["GET"]),
+        Route("/fea/{rest:path}", fea_file, methods=["GET"]),
+        Route("/render/{rest:path}", render_file, methods=["GET"]),
         Route("/app", app_static, methods=["GET"]),
         Route("/app/{rest:path}", app_static, methods=["GET"]),
         WebSocketRoute("/ws", ws),
