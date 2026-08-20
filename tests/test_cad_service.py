@@ -328,7 +328,8 @@ def test_fea_static_ok_and_served(client, assembly_step, tmp_path, monkeypatch):
     monkeypatch.setattr(cad_fea, "fea_status", lambda: _fea_status(True))
     seen = {}
 
-    def fake_run_static(step_path, out_dir, spec=None, force=False):
+    def fake_run_static(step_path, out_dir, spec=None, force=False,
+                        progress=None, should_cancel=None):
         seen["step"] = step_path
         seen["spec"] = spec
         os.makedirs(out_dir, exist_ok=True)
@@ -381,7 +382,8 @@ def test_render_ok_uses_real_entries_and_serves_png(client, assembly_step,
                         lambda: _render_status(True))
     seen = {}
 
-    def fake_scene(entries, out_dir, spec=None, force=False):
+    def fake_scene(entries, out_dir, spec=None, force=False,
+                   progress=None, should_cancel=None):
         seen["entries"] = entries
         os.makedirs(out_dir, exist_ok=True)
         with open(os.path.join(out_dir, "render.png"), "wb") as f:
@@ -422,3 +424,149 @@ def test_fea_traversal_rejected(client):
     r = client.get("/fea/../../cad_service.py")
     assert r.status_code in (403, 404)
     assert "def create_app" not in r.text
+
+
+# --------------------------------------------------------------------------
+# R5 job/progress protocol: async mode + query + cancel
+# --------------------------------------------------------------------------
+
+import time   # noqa: E402
+
+
+def _wait_job(client, jid, timeout_s=10.0):
+    """Poll GET /api/jobs/{id} until finished (mirrors the frontend loop)."""
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        r = client.get(f"/api/jobs/{jid}", headers=_hdr())
+        assert r.status_code == 200
+        body = r.json()
+        if body["status"] in ("done", "error", "cancelled"):
+            return body
+        time.sleep(0.05)
+    raise AssertionError(f"job {jid} did not finish in {timeout_s}s")
+
+
+def test_job_endpoints_auth_and_404(client):
+    assert client.get("/api/jobs").status_code == 401
+    assert client.get("/api/jobs/deadbeef", headers=_hdr()).status_code == 404
+    r = client.post("/api/jobs/deadbeef/cancel", headers=_hdr())
+    assert r.status_code == 404
+
+
+def test_fea_async_job_lifecycle(client, assembly_step, tmp_path, monkeypatch):
+    ck = _cache_key_of(client, str(tmp_path / "inputs"), assembly_step)
+    monkeypatch.setattr(cad_fea, "fea_status", lambda: _fea_status(True))
+
+    def fake_run_static(step_path, out_dir, spec=None, force=False,
+                        progress=None, should_cancel=None):
+        if progress:
+            progress("solve", 50, "fake phase")
+        os.makedirs(out_dir, exist_ok=True)
+        with open(os.path.join(out_dir, "result.json"), "w",
+                  encoding="utf-8") as f:
+            json.dump({"schema_version": 1, "ok": True,
+                       "max_displacement_mm": 0.03}, f)
+        return {"schema_version": 1, "ok": True, "cache_hit": False,
+                "max_displacement_mm": 0.03}
+
+    monkeypatch.setattr(cad_fea, "run_static", fake_run_static)
+    r = client.post("/api/fea/static",
+                    json={"cache_key": ck, "template_id": "t0",
+                          "async": True},
+                    headers=_hdr())
+    assert r.status_code == 202, r.text
+    started = r.json()
+    assert started["kind"] == "fea" and started["status"] == "queued"
+    assert started["url"] == f"/api/jobs/{started['job_id']}"
+    assert started["meta"]["template_id"] == "t0"
+
+    job = _wait_job(client, started["job_id"])
+    assert job["status"] == "done"
+    assert job["result"]["ok"] is True
+    assert len(job["result"]["fea_key"]) == 16
+    assert job["result"]["base_url"].startswith("/fea/")
+    # job list contains it too
+    r = client.get("/api/jobs", headers=_hdr())
+    assert any(j["id"] == started["job_id"] for j in r.json()["jobs"])
+
+
+def test_render_async_job_lifecycle(client, assembly_step, tmp_path,
+                                    monkeypatch):
+    ck = _cache_key_of(client, str(tmp_path / "inputs"), assembly_step)
+    monkeypatch.setattr(cad_render, "render_status",
+                        lambda: _render_status(True))
+
+    def fake_scene(entries, out_dir, spec=None, force=False,
+                   progress=None, should_cancel=None):
+        os.makedirs(out_dir, exist_ok=True)
+        with open(os.path.join(out_dir, "render.png"), "wb") as f:
+            f.write(b"\x89PNG stub")
+        with open(os.path.join(out_dir, "result.json"), "w",
+                  encoding="utf-8") as f:
+            json.dump({"schema_version": 1, "ok": True, "engine": "CYCLES"},
+                      f)
+        return {"schema_version": 1, "ok": True, "engine": "CYCLES",
+                "cache_hit": False}
+
+    monkeypatch.setattr(cad_render, "render_scene", fake_scene)
+    r = client.post("/api/render", json={"cache_key": ck, "async": True},
+                    headers=_hdr())
+    assert r.status_code == 202, r.text
+    jid = r.json()["job_id"]
+    job = _wait_job(client, jid)
+    assert job["status"] == "done"
+    assert job["result"]["png_url"].startswith("/render/")
+    # the rendered png is served over HTTP
+    r2 = client.get(job["result"]["png_url"])
+    assert r2.status_code == 200
+    assert r2.headers["content-type"].startswith("image/png")
+
+
+def test_job_cancel_cooperative(client, assembly_step, tmp_path, monkeypatch):
+    ck = _cache_key_of(client, str(tmp_path / "inputs"), assembly_step)
+    monkeypatch.setattr(cad_fea, "fea_status", lambda: _fea_status(True))
+
+    def fake_run_static(step_path, out_dir, spec=None, force=False,
+                        progress=None, should_cancel=None):
+        if progress:
+            progress("solve", 30, "迭代中")
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            if should_cancel and should_cancel():
+                raise cad_fea.FEAError("FEA 求解已取消", kind="cancelled")
+            time.sleep(0.02)
+        return {"ok": True}
+
+    monkeypatch.setattr(cad_fea, "run_static", fake_run_static)
+    r = client.post("/api/fea/static",
+                    json={"cache_key": ck, "template_id": "t0",
+                          "async": True},
+                    headers=_hdr())
+    jid = r.json()["job_id"]
+    time.sleep(0.2)                      # let it enter the solve loop
+    rc = client.post(f"/api/jobs/{jid}/cancel", headers=_hdr())
+    assert rc.status_code == 200
+    job = _wait_job(client, jid)
+    assert job["status"] == "cancelled"
+    assert job["error_kind"] == "cancelled"
+    # cancel is idempotent on finished jobs
+    rc2 = client.post(f"/api/jobs/{jid}/cancel", headers=_hdr())
+    assert rc2.status_code == 200
+
+
+def test_async_job_error_capture(client, assembly_step, tmp_path, monkeypatch):
+    ck = _cache_key_of(client, str(tmp_path / "inputs"), assembly_step)
+    monkeypatch.setattr(cad_fea, "fea_status", lambda: _fea_status(True))
+
+    def boom(*a, **k):
+        raise cad_fea.FEAError("求解器崩溃", kind="failure")
+
+    monkeypatch.setattr(cad_fea, "run_static", boom)
+    r = client.post("/api/fea/static",
+                    json={"cache_key": ck, "template_id": "t0",
+                          "async": True},
+                    headers=_hdr())
+    job = _wait_job(client, r.json()["job_id"])
+    assert job["status"] == "error"
+    assert "求解器崩溃" in job["error"]
+    assert job["error_kind"] == "failure"

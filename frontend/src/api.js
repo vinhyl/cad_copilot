@@ -51,6 +51,43 @@ export async function importDrawing(inputPath) {
   return _post('/api/drawing/import', { input_path: inputPath });
 }
 
+/** D5/D7 插件探测：ODA / FreeCAD+CalculiX / Blender 可用性。 */
+export async function getPlugins() {
+  const r = await fetch('/api/plugins', {
+    headers: { Authorization: `Bearer ${getToken()}` },
+  });
+  const body = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(body.error || `HTTP ${r.status}`);
+  return body;
+}
+
+/** R5 异步 FEA：202 + {job_id, url}，轮询 getJob。 */
+export function startFeaJob(cacheKey, templateId, spec = {}) {
+  return _post('/api/fea/static', {
+    cache_key: cacheKey, template_id: templateId, spec, async: true,
+  });
+}
+
+/** R5 异步渲染：202 + {job_id, url}。 */
+export function startRenderJob(cacheKey, spec = {}) {
+  return _post('/api/render', { cache_key: cacheKey, spec, async: true });
+}
+
+/** R5 任务查询：{status, progress, result, error, ...}。 */
+export async function getJob(jobId) {
+  const r = await fetch(`/api/jobs/${encodeURIComponent(jobId)}`, {
+    headers: { Authorization: `Bearer ${getToken()}` },
+  });
+  const body = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(body.error || `HTTP ${r.status}`);
+  return body;
+}
+
+/** R5 协作取消（幂等：对已完成任务返回最终状态）。 */
+export function cancelJob(jobId) {
+  return _post(`/api/jobs/${encodeURIComponent(jobId)}/cancel`, {});
+}
+
 async function _post(url, payload) {
   const r = await fetch(url, {
     method: 'POST',

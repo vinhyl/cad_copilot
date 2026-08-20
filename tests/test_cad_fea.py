@@ -187,7 +187,7 @@ def test_run_static_orchestrates_subprocess(tmp_path, monkeypatch, selftest_step
                "phases": {"solve": {"ok": True}},
                "max_displacement_mm": 0.01, "max_von_mises_MPa": 12.5}
 
-    def fake_invoke(exe, script_path, timeout_s):
+    def fake_invoke(exe, script_path, timeout_s, **kwargs):
         calls.append((exe, script_path, timeout_s))
         # the generated script must exist and be valid Python
         with open(script_path, encoding="utf-8") as f:
@@ -231,7 +231,7 @@ def test_run_static_force_recomputes(tmp_path, monkeypatch, selftest_step):
     (out / "result.json").write_text(
         json.dumps({"ok": True, "stale": True}), encoding="utf-8")
 
-    def fake_invoke(exe, script_path, timeout_s):
+    def fake_invoke(exe, script_path, timeout_s, **kwargs):
         with open(os.path.join(os.path.dirname(script_path), "result.json"),
                   "w", encoding="utf-8") as f:
             json.dump({"ok": True, "stale": False}, f)
@@ -245,7 +245,7 @@ def test_run_static_force_recomputes(tmp_path, monkeypatch, selftest_step):
 def test_run_static_timeout_kind(tmp_path, monkeypatch, selftest_step):
     _available(monkeypatch)
 
-    def timeout(exe, script_path, timeout_s):
+    def timeout(exe, script_path, timeout_s, **kwargs):
         raise subprocess.TimeoutExpired(cmd="freecadcmd", timeout=timeout_s)
 
     monkeypatch.setattr(cad_fea, "_invoke", timeout)
@@ -257,7 +257,64 @@ def test_run_static_timeout_kind(tmp_path, monkeypatch, selftest_step):
 def test_run_static_failure_without_result(tmp_path, monkeypatch, selftest_step):
     _available(monkeypatch)
     monkeypatch.setattr(cad_fea, "_invoke",
-                        lambda *a: subprocess.CompletedProcess([], 1))
+                        lambda *a, **k: subprocess.CompletedProcess([], 1))
     with pytest.raises(cad_fea.FEAError) as ei:
         cad_fea.run_static(selftest_step, str(tmp_path / "fea"))
     assert ei.value.kind == "failure"
+
+
+# --------------------------------------------------------------------------
+# R5: real-subprocess cancel + phase-relay progress (Popen polling loop)
+# --------------------------------------------------------------------------
+
+def test_invoke_cancel_terminates_real_subprocess(tmp_path, monkeypatch,
+                                                  selftest_step):
+    """The polling loop must terminate a live subprocess on cancel (R5)."""
+    import sys
+    import time as _time
+    _available(monkeypatch)
+    monkeypatch.setattr(cad_fea, "build_freecad_script",
+                        lambda *a: "import time\ntime.sleep(30)\n")
+    # freecad exe -> this python; build_command yields [exe, script]
+    monkeypatch.setattr(cad_fea, "fea_status",
+                        lambda: _status(True, sys.executable, "ccx"))
+    t0 = _time.monotonic()
+    with pytest.raises(cad_fea.FEAError) as ei:
+        cad_fea.run_static(
+            selftest_step, str(tmp_path / "fea"),
+            should_cancel=lambda: _time.monotonic() - t0 > 0.5)
+    assert ei.value.kind == "cancelled"
+    assert _time.monotonic() - t0 < 15   # terminated, not waited out
+
+
+def test_invoke_relays_inner_phases_as_progress(tmp_path, monkeypatch,
+                                                selftest_step):
+    """Phases the inner script flushes into result.json surface on the
+    progress callback with their mapped percents."""
+    import sys
+    import time as _time
+    _available(monkeypatch)
+    monkeypatch.setattr(cad_fea, "fea_status",
+                        lambda: _status(True, sys.executable, "ccx"))
+    out_dir = tmp_path / "fea"
+
+    # inner "FreeCAD" script: write two phases, then sleep until killed
+    script = (
+        "import json, time\n"
+        f"open(r'{out_dir.as_posix()}/result.json', 'w').write(json.dumps("
+        "{'phases': {'interpreter': {'ok': True, 'detail': '0.20'},"
+        " 'mesh': {'ok': True, 'detail': 'nodes=42'}}}))\n"
+        "time.sleep(30)\n")
+    monkeypatch.setattr(cad_fea, "build_freecad_script",
+                        lambda *a: script)
+
+    seen = []
+    t0 = _time.monotonic()
+    with pytest.raises(cad_fea.FEAError):
+        cad_fea.run_static(
+            selftest_step, str(out_dir),
+            progress=lambda ph, pct, d: seen.append((ph, pct)),
+            should_cancel=lambda: _time.monotonic() - t0 > 0.7)
+    phases = dict(seen)
+    assert phases.get("interpreter") == 10
+    assert phases.get("mesh") == 55

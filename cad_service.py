@@ -43,6 +43,7 @@ from starlette.routing import Route, WebSocketRoute
 
 import cad_assembly
 import cad_core
+import cad_jobs
 from cad_core import _SuppressStdout
 
 DEFAULT_HOST = "127.0.0.1"
@@ -149,6 +150,16 @@ def create_app(token: str | None = None,
         if not (rp == render_root or rp.startswith(render_root + os.sep)):
             raise PermissionError("render path escape")
         return rp
+
+    # R5: long-task jobs (FEA solve / Blender render) -- job id + progress
+    # + cooperative cancel, in-memory (ephemeral by design).
+    jobs_mgr = cad_jobs.JobManager()
+
+    def _ctx_progress(ctx):
+        return None if ctx is None else ctx.report
+
+    def _ctx_cancel(ctx):
+        return None if ctx is None else ctx.should_cancel
 
     def check_auth(request) -> None:
         supplied = (request.headers.get("authorization", "")
@@ -501,11 +512,59 @@ def create_app(token: str | None = None,
             "blender": cad_render.render_status(),
         })
 
+    def _fea_core(cache_key: str, tid: str, spec: dict, force: bool,
+                  ctx=None) -> dict:
+        """Shared FEA body (sync handler + R5 async job). ctx is a
+        cad_jobs._JobCtx or None."""
+        import cad_fea
+        cache_dir, _ = _edit_context(cache_key)
+        store = _store(cache_key)
+        step_path = store.resolve_step(
+            tid, baseline_step=os.path.join(cache_dir, "parts", f"{tid}.step"))
+        key = cad_fea.fea_cache_key(step_path, spec)
+        out_dir = os.path.join(fea_root, key)
+        result = cad_fea.run_static(
+            step_path, out_dir, spec, force=force,
+            progress=_ctx_progress(ctx), should_cancel=_ctx_cancel(ctx))
+        result["fea_key"] = key
+        result["base_url"] = f"/fea/{key}"
+        return result
+
+    def _render_core(cache_key: str, spec: dict, force: bool,
+                     ctx=None) -> dict:
+        """Shared render body (sync handler + R5 async job)."""
+        import cad_render
+        cache_dir, manifest = _edit_context(cache_key)
+        store = _store(cache_key)
+
+        def resolve_gltf_abs(tid: str) -> str | None:
+            vurl = store.resolve_gltf(tid)
+            if vurl:
+                return os.path.join(workspace, vurl.lstrip("/"))
+            return os.path.join(cache_dir, "gltf_library", f"{tid}.gltf")
+
+        entries = cad_render.build_render_entries(manifest, resolve_gltf_abs)
+        key = cad_render.render_cache_key(entries, spec)
+        out_dir = os.path.join(render_root, key)
+        result = cad_render.render_scene(
+            entries, out_dir, spec, force=force,
+            progress=_ctx_progress(ctx), should_cancel=_ctx_cancel(ctx))
+        result["render_key"] = key
+        result["base_url"] = f"/render/{key}"
+        result["png_url"] = f"/render/{key}/render.png"
+        return result
+
+    def _job_started(jid: str, kind: str, meta: dict) -> JSONResponse:
+        return JSONResponse({"job_id": jid, "kind": kind, "status": "queued",
+                             "url": f"/api/jobs/{jid}", "meta": meta},
+                            status_code=202)
+
     async def fea_static(request):
         """POST /api/fea/static -- D7 FEA plugin: CalculiX static single
         scenario on a version-resolved template STEP (D6: FreeCAD runs as a
-        headless subprocess). Sync + clamped timeout; the R5 job/progress
-        protocol is a later increment."""
+        headless subprocess). Default synchronous; ``"async": true``
+        switches to the R5 job protocol (202 + job_id, poll
+        /api/jobs/{id}, cancel via /api/jobs/{id}/cancel)."""
         try:
             check_auth(request)
             body = json.loads(await request.body() or b"{}")
@@ -525,17 +584,19 @@ def create_app(token: str | None = None,
                 {"error": f"unknown template_id: {tid}"}, status_code=400)
 
         spec = body.get("spec") or {}
+        force = bool(body.get("force"))
+        if body.get("async"):
+            jid = jobs_mgr.submit(
+                "fea", lambda ctx: _fea_core(cache_key, tid, spec, force, ctx),
+                meta={"cache_key": cache_key, "template_id": tid})
+            return _job_started(jid, "fea",
+                                {"cache_key": cache_key, "template_id": tid})
         import cad_fea
         try:
-            store = _store(cache_key)
-            step_path = store.resolve_step(
-                tid, baseline_step=os.path.join(cache_dir, "parts", f"{tid}.step"))
-            key = cad_fea.fea_cache_key(step_path, spec)
-            out_dir = os.path.join(fea_root, key)
-            result = cad_fea.run_static(step_path, out_dir, spec,
-                                        force=bool(body.get("force")))
+            result = _fea_core(cache_key, tid, spec, force)
         except cad_fea.FEAError as e:
-            code = {"missing": 503, "timeout": 504}.get(e.kind, 422)
+            code = {"missing": 503, "timeout": 504,
+                    "cancelled": 409}.get(e.kind, 422)
             return JSONResponse({"ok": False, "error": str(e), "plugin": "fea",
                                  "kind": e.kind, "missing": e.missing},
                                 status_code=code)
@@ -544,14 +605,13 @@ def create_app(token: str | None = None,
                                  "stage": "validation"}, status_code=400)
         except FileNotFoundError as e:
             return JSONResponse({"ok": False, "error": str(e)}, status_code=404)
-        result["fea_key"] = key
-        result["base_url"] = f"/fea/{key}"
         return JSONResponse(result)
 
     async def render(request):
         """POST /api/render -- D7 render plugin: Blender headless still of
         the version-resolved assembly state (R9: external dependency, never
-        bundled). Sync + clamped timeout; R5 job/protocol later."""
+        bundled). Default synchronous; ``"async": true`` switches to the R5
+        job protocol (202 + job_id, progress + cancel)."""
         try:
             check_auth(request)
             body = json.loads(await request.body() or b"{}")
@@ -567,33 +627,62 @@ def create_app(token: str | None = None,
             return JSONResponse({"error": str(e)}, status_code=404)
 
         spec = body.get("spec") or {}
+        force = bool(body.get("force"))
+        if body.get("async"):
+            jid = jobs_mgr.submit(
+                "render", lambda ctx: _render_core(cache_key, spec, force, ctx),
+                meta={"cache_key": cache_key})
+            return _job_started(jid, "render", {"cache_key": cache_key})
         import cad_render
         try:
-            store = _store(cache_key)
-
-            def resolve_gltf_abs(tid: str) -> str | None:
-                vurl = store.resolve_gltf(tid)
-                if vurl:
-                    return os.path.join(workspace, vurl.lstrip("/"))
-                return os.path.join(cache_dir, "gltf_library", f"{tid}.gltf")
-
-            entries = cad_render.build_render_entries(manifest, resolve_gltf_abs)
-            key = cad_render.render_cache_key(entries, spec)
-            out_dir = os.path.join(render_root, key)
-            result = cad_render.render_scene(entries, out_dir, spec,
-                                             force=bool(body.get("force")))
+            result = _render_core(cache_key, spec, force)
         except cad_render.RenderError as e:
-            code = {"missing": 503, "timeout": 504}.get(e.kind, 422)
+            code = {"missing": 503, "timeout": 504,
+                    "cancelled": 409}.get(e.kind, 422)
             return JSONResponse({"ok": False, "error": str(e),
                                  "plugin": "render", "kind": e.kind,
                                  "missing": e.missing}, status_code=code)
         except ValueError as e:
             return JSONResponse({"ok": False, "error": str(e),
                                  "stage": "validation"}, status_code=400)
-        result["render_key"] = key
-        result["base_url"] = f"/render/{key}"
-        result["png_url"] = f"/render/{key}/render.png"
         return JSONResponse(result)
+
+    # ----------------------------------------------------------------------
+    # R5 job protocol: query / list / cancel
+    # ----------------------------------------------------------------------
+
+    async def job_get(request):
+        """GET /api/jobs/{id} -- job snapshot (status/progress/result)."""
+        try:
+            check_auth(request)
+        except PermissionError as e:
+            return JSONResponse({"error": str(e)}, status_code=401)
+        snap = jobs_mgr.get(request.path_params["jid"])
+        if snap is None:
+            return JSONResponse({"error": "no such job"}, status_code=404)
+        return JSONResponse(snap)
+
+    async def jobs_list(request):
+        """GET /api/jobs -- all job snapshots (newest last)."""
+        try:
+            check_auth(request)
+        except PermissionError as e:
+            return JSONResponse({"error": str(e)}, status_code=401)
+        return JSONResponse({"jobs": jobs_mgr.list()})
+
+    async def job_cancel(request):
+        """POST /api/jobs/{id}/cancel -- request cooperative cancellation.
+
+        200 always (idempotent): finished jobs simply report their final
+        status; running jobs get the terminate hook fired as a backstop."""
+        try:
+            check_auth(request)
+        except PermissionError as e:
+            return JSONResponse({"error": str(e)}, status_code=401)
+        snap = jobs_mgr.cancel(request.path_params["jid"])
+        if snap is None:
+            return JSONResponse({"error": "no such job"}, status_code=404)
+        return JSONResponse(snap)
 
     async def fea_file(request):
         try:
@@ -615,9 +704,10 @@ def create_app(token: str | None = None,
             fp, media_type=_MIME.get(os.path.splitext(fp)[1].lower()))
 
     async def ws(websocket):
-        """Minimal JSON protocol skeleton (full job/progress protocol is a
-        later increment per R5/R13): {action: "ping"} | {action: "parse",
-        input_path}."""
+        """Minimal JSON protocol skeleton ({action: "ping"} | {action:
+        "parse", input_path}). R5 long tasks use the HTTP job endpoints
+        (/api/jobs/...) instead -- WebSocket push can reuse the same job
+        snapshots later if polling ever becomes too chatty."""
         supplied = websocket.query_params.get("token", "")
         if not secrets.compare_digest(supplied, token):
             await websocket.close(code=4401)
@@ -688,6 +778,9 @@ def create_app(token: str | None = None,
         Route("/api/plugins", plugins, methods=["GET"]),
         Route("/api/fea/static", fea_static, methods=["POST"]),
         Route("/api/render", render, methods=["POST"]),
+        Route("/api/jobs", jobs_list, methods=["GET"]),
+        Route("/api/jobs/{jid}", job_get, methods=["GET"]),
+        Route("/api/jobs/{jid}/cancel", job_cancel, methods=["POST"]),
         Route("/cache/{rest:path}", cache_file, methods=["GET"]),
         Route("/versions/{rest:path}", versions_file, methods=["GET"]),
         Route("/drawings/{rest:path}", drawings_file, methods=["GET"]),

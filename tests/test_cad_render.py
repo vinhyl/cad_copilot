@@ -203,7 +203,7 @@ def test_render_scene_orchestrates_subprocess(tmp_path, monkeypatch):
                 "instances": [cad_render._IDENTITY_3X4]}]
     calls = []
 
-    def fake_invoke(exe, script_path, timeout_s):
+    def fake_invoke(exe, script_path, timeout_s, **kwargs):
         calls.append((exe, script_path, timeout_s))
         with open(script_path, encoding="utf-8") as f:
             compile(f.read(), "render_script.py", "exec")
@@ -244,7 +244,7 @@ def test_render_scene_cache_hit_skips_subprocess(tmp_path, monkeypatch):
 def test_render_scene_timeout_kind(tmp_path, monkeypatch):
     _available(monkeypatch)
 
-    def timeout(exe, script_path, timeout_s):
+    def timeout(exe, script_path, timeout_s, **kwargs):
         raise subprocess.TimeoutExpired(cmd="blender", timeout=timeout_s)
 
     monkeypatch.setattr(cad_render, "_invoke", timeout)
@@ -257,7 +257,7 @@ def test_render_scene_timeout_kind(tmp_path, monkeypatch):
 def test_render_scene_failure_when_png_missing(tmp_path, monkeypatch):
     _available(monkeypatch)
 
-    def fake_invoke(exe, script_path, timeout_s):
+    def fake_invoke(exe, script_path, timeout_s, **kwargs):
         out_dir = os.path.dirname(script_path)
         with open(os.path.join(out_dir, "result.json"), "w",
                   encoding="utf-8") as f:
@@ -274,8 +274,33 @@ def test_render_scene_failure_when_png_missing(tmp_path, monkeypatch):
 def test_render_scene_failure_without_result(tmp_path, monkeypatch):
     _available(monkeypatch)
     monkeypatch.setattr(cad_render, "_invoke",
-                        lambda *a: subprocess.CompletedProcess([], 1))
+                        lambda *a, **k: subprocess.CompletedProcess([], 1))
     with pytest.raises(cad_render.RenderError) as ei:
         cad_render.render_scene([{"gltf": "x", "name": "T",
                                   "instances": []}], str(tmp_path / "r"))
     assert ei.value.kind == "failure"
+
+
+# --------------------------------------------------------------------------
+# R5: real-subprocess cancel (Popen polling loop)
+# --------------------------------------------------------------------------
+
+def test_invoke_cancel_terminates_real_subprocess(tmp_path, monkeypatch):
+    """The polling loop must terminate a live Blender subprocess on cancel."""
+    import sys
+    import time as _time
+    monkeypatch.setattr(cad_render, "render_status",
+                        lambda: _status(True, sys.executable))
+    # python.exe can't take blender flags: plain [exe, script]
+    monkeypatch.setattr(cad_render, "build_command",
+                        lambda exe, script: [exe, script])
+    monkeypatch.setattr(cad_render, "build_blender_script",
+                        lambda payload: "import time\ntime.sleep(30)\n")
+    entries = [{"gltf": "x", "name": "T", "instances": []}]
+    t0 = _time.monotonic()
+    with pytest.raises(cad_render.RenderError) as ei:
+        cad_render.render_scene(
+            entries, str(tmp_path / "r"),
+            should_cancel=lambda: _time.monotonic() - t0 > 0.5)
+    assert ei.value.kind == "cancelled"
+    assert _time.monotonic() - t0 < 15   # terminated, not waited out

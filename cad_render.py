@@ -25,8 +25,11 @@ Caching (R8/R17): results live in a content-keyed out_dir (sha256 of the
 glTF contents + instance matrices + canonical spec); an existing
 ``result.json`` short-circuits Blender.
 
-Long tasks (R5): synchronous with clamped timeout; job-id + progress +
-cancel WebSocket protocol is a documented later increment.
+Long tasks (R5): ``render_scene`` accepts ``progress`` /
+``should_cancel`` hooks -- the service layer wires them into
+cad_jobs.JobManager (job id + indeterminate progress + cooperative
+cancel: Popen terminate, 5s grace then kill). The subprocess is also
+clamped by spec.timeout_s.
 """
 from __future__ import annotations
 
@@ -35,6 +38,7 @@ import json
 import os
 import shutil
 import subprocess
+import time
 
 DEFAULT_SPEC = {
     "engine": "cycles",        # cycles | workbench | eevee (headless-safe: cycles CPU)
@@ -388,11 +392,51 @@ def build_command(blender_exe: str, script_path: str) -> list:
     return [blender_exe, "--background", "--python", script_path]
 
 
-def _invoke(blender_exe: str, script_path: str, timeout_s: float):
-    """Run the Blender subprocess (seam for tests)."""
-    return subprocess.run(
+_POLL_INTERVAL_S = 0.2
+_CANCEL_GRACE_S = 5.0
+
+
+def _invoke(blender_exe: str, script_path: str, timeout_s: float,
+            should_cancel=None, progress=None):
+    """Run the Blender subprocess (seam for tests).
+
+    Popen + polling so the caller can CANCEL cooperatively (R5) and the
+    clamped timeout kills a stuck render. Cycles has no phase stream we can
+    tap headlessly, so progress is indeterminate (percent=None). stdout and
+    stderr go to DEVNULL (result travels via result.json).
+    """
+    proc = subprocess.Popen(
         build_command(blender_exe, script_path),
-        capture_output=True, timeout=timeout_s)
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    start = time.monotonic()
+    try:
+        while True:
+            if proc.poll() is not None:
+                return proc.returncode
+            if should_cancel is not None and should_cancel():
+                _kill(proc)
+                raise RenderError("渲染已取消", kind="cancelled")
+            if time.monotonic() - start > timeout_s:
+                _kill(proc)
+                raise RenderError(
+                    f"渲染超时（>{timeout_s:.0f}s），可通过 spec.timeout_s 上调；"
+                    f"任务已终止。", kind="timeout")
+            if progress is not None:
+                progress("render", None, "Blender 渲染中")
+                progress = None   # report the indeterminate phase only once
+            time.sleep(_POLL_INTERVAL_S)
+    finally:
+        if proc.poll() is None:
+            _kill(proc)
+
+
+def _kill(proc: subprocess.Popen) -> None:
+    proc.terminate()
+    try:
+        proc.wait(timeout=_CANCEL_GRACE_S)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
 
 
 # --------------------------------------------------------------------------
@@ -400,13 +444,19 @@ def _invoke(blender_exe: str, script_path: str, timeout_s: float):
 # --------------------------------------------------------------------------
 
 def render_scene(entries: list, out_dir: str, spec: dict | None = None,
-                 force: bool = False) -> dict:
+                 force: bool = False, progress=None,
+                 should_cancel=None) -> dict:
     """Render the entries to out_dir/render.png, cached (R8/R17).
 
     Returns the result.json payload (+ "cache_hit"). Raises RenderError for
-    missing Blender (kind="missing"), timeout (kind="timeout") and render
-    failure (kind="failure").
+    missing Blender (kind="missing"), timeout (kind="timeout"), user
+    cancellation (kind="cancelled") and render failure (kind="failure").
+
+    R5 hooks: ``progress(phase, percent, detail)`` (indeterminate during
+    the Blender run) and ``should_cancel()`` polled while it runs.
     """
+    if progress:
+        progress("probe", 5, "探测 Blender")
     status = render_status()
     if not status["available"]:
         raise RenderError(status["hint"] or "渲染插件不可用",
@@ -418,9 +468,13 @@ def render_scene(entries: list, out_dir: str, spec: dict | None = None,
         with open(result_path, encoding="utf-8") as f:
             result = json.load(f)
         result["cache_hit"] = True
+        if progress:
+            progress("cache", 100, "缓存命中")
         return result
 
     os.makedirs(out_dir, exist_ok=True)
+    if progress:
+        progress("prepare", 10, "生成 Blender 渲染脚本")
     png = os.path.join(out_dir, "render.png")
     script_path = os.path.join(out_dir, "render_script.py")
     with open(script_path, "w", encoding="utf-8") as f:
@@ -432,8 +486,9 @@ def render_scene(entries: list, out_dir: str, spec: dict | None = None,
         }))
 
     try:
-        _invoke(status["blender"], script_path, spec_n["timeout_s"])
-    except subprocess.TimeoutExpired as e:
+        _invoke(status["blender"], script_path, spec_n["timeout_s"],
+                should_cancel=should_cancel, progress=progress)
+    except subprocess.TimeoutExpired as e:   # stubbed _invoke (tests)
         raise RenderError(
             f"渲染超时（>{spec_n['timeout_s']:.0f}s），可通过 spec.timeout_s 上调；"
             f"任务已终止。", kind="timeout") from e

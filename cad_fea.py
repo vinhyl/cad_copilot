@@ -18,9 +18,11 @@ Caching (R8/R17): results live in a content-keyed out_dir supplied by the
 caller (sha256 of the STEP content + canonical spec). An existing
 ``result.json`` short-circuits the subprocess (``cache_hit=True``).
 
-Long tasks (R5): this framework runs the solve synchronously with a clamped
-timeout; the job-id + progress + cancel WebSocket protocol remains a
-documented later increment.
+Long tasks (R5): ``run_static`` accepts ``progress`` / ``should_cancel``
+hooks -- the service layer wires them into cad_jobs.JobManager so the
+frontend gets a job id + phase progress (relayed from the inner script's
+result.json flushes) + cooperative cancel (Popen terminate, 5s grace then
+kill). The subprocess is also clamped by spec.timeout_s.
 
 NOTE -- the INNER script (the part that runs inside FreeCAD) follows the
 documented FreeCAD FEM scripting API but is exercised only once FreeCAD is
@@ -36,6 +38,7 @@ import json
 import os
 import shutil
 import subprocess
+import time
 
 DEFAULT_SPEC = {
     "axis": "z",                # restraint/press direction
@@ -416,11 +419,75 @@ def build_command(freecad_exe: str, script_path: str) -> list:
     return [freecad_exe, script_path]
 
 
-def _invoke(freecad_exe: str, script_path: str, timeout_s: float):
-    """Run the FreeCAD subprocess (seam for tests; D6: out of process)."""
-    return subprocess.run(
+_POLL_INTERVAL_S = 0.2
+_CANCEL_GRACE_S = 5.0
+
+# inner-script phase -> percent on the job progress bar (R5). The inner
+# script rewrites result.json at every phase flush, so watching the file
+# gives REAL progress straight from inside FreeCAD.
+_PHASE_PERCENT = {"interpreter": 10, "geometry": 20, "faces": 30,
+                  "setup": 40, "mesh": 55, "solve": 75, "post": 95}
+
+
+def _invoke(freecad_exe: str, script_path: str, timeout_s: float,
+            should_cancel=None, progress=None, result_path: str | None = None):
+    """Run the FreeCAD subprocess (seam for tests; D6: out of process).
+
+    Popen + polling so the caller can CANCEL cooperatively (R5): the loop
+    checks ``should_cancel()`` every poll, terminates the process and raises
+    FEAError(kind="cancelled"). While the solver runs, phase updates the
+    inner script writes into result.json are relayed through ``progress``.
+    stdout/stderr go to DEVNULL (result travels via result.json; no pipe
+    deadlock when CalculiX gets chatty).
+    """
+    proc = subprocess.Popen(
         build_command(freecad_exe, script_path),
-        capture_output=True, timeout=timeout_s)
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    start = time.monotonic()
+    reported: set[str] = set()
+    try:
+        while True:
+            if proc.poll() is not None:
+                return proc.returncode
+            if should_cancel is not None and should_cancel():
+                _kill(proc)
+                raise FEAError("FEA 求解已取消", kind="cancelled")
+            if time.monotonic() - start > timeout_s:
+                _kill(proc)
+                raise FEAError(
+                    f"FEA 求解超时（>{timeout_s:.0f}s），可通过 spec.timeout_s "
+                    f"上调；任务已终止。", kind="timeout")
+            if progress is not None and result_path and \
+                    os.path.isfile(result_path):
+                _relay_phases(result_path, reported, progress)
+            time.sleep(_POLL_INTERVAL_S)
+    finally:
+        if proc.poll() is None:  # e.g. KeyboardInterrupt on the service
+            _kill(proc)
+
+
+def _kill(proc: subprocess.Popen) -> None:
+    proc.terminate()
+    try:
+        proc.wait(timeout=_CANCEL_GRACE_S)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+
+
+def _relay_phases(result_path: str, reported: set, progress) -> None:
+    """Forward not-yet-reported inner-script phases to the progress bar."""
+    try:
+        with open(result_path, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return  # half-written file mid-flush; next poll retries
+    for phase, ok in (data.get("phases") or {}).items():
+        if phase not in reported:
+            reported.add(phase)
+            detail = "失败: " + str(ok.get("detail")) if not ok.get("ok") \
+                else ok.get("detail")
+            progress(phase, _PHASE_PERCENT.get(phase), detail)
 
 
 # --------------------------------------------------------------------------
@@ -428,16 +495,24 @@ def _invoke(freecad_exe: str, script_path: str, timeout_s: float):
 # --------------------------------------------------------------------------
 
 def run_static(step_path: str, out_dir: str, spec: dict | None = None,
-               force: bool = False) -> dict:
+               force: bool = False, progress=None,
+               should_cancel=None) -> dict:
     """Run the single-scenario static analysis, cached under out_dir.
 
     Returns the result.json payload (+ "cache_hit"). Raises FEAError for
-    missing dependencies (kind="missing"), timeout (kind="timeout") and
-    solver failure (kind="failure").
+    missing dependencies (kind="missing"), timeout (kind="timeout"),
+    user cancellation (kind="cancelled") and solver failure
+    (kind="failure").
+
+    R5 hooks: ``progress(phase, percent, detail)`` receives orchestration
+    phases plus the inner-script phases relayed from result.json;
+    ``should_cancel()`` is polled while the subprocess runs.
     """
     if not os.path.isfile(step_path):
         raise FileNotFoundError(f"no such STEP file: {step_path}")
 
+    if progress:
+        progress("probe", 5, "探测 FreeCAD / CalculiX")
     status = fea_status()
     if not status["available"]:
         raise FEAError(status["hint"] or "FEA 插件不可用",
@@ -449,18 +524,26 @@ def run_static(step_path: str, out_dir: str, spec: dict | None = None,
         with open(result_path, encoding="utf-8") as f:
             result = json.load(f)
         result["cache_hit"] = True
+        if progress:
+            progress("cache", 100, "缓存命中")
         return result
 
     os.makedirs(out_dir, exist_ok=True)
+    if progress:
+        progress("prepare", 8, "生成 FreeCAD 求解脚本")
     script_path = os.path.join(out_dir, "fea_script.py")
     with open(script_path, "w", encoding="utf-8") as f:
         f.write(build_freecad_script(
             os.path.abspath(step_path), os.path.abspath(out_dir),
             spec_n, status["calculix"]))
 
+    if progress:
+        progress("solve", 12, "FreeCAD 子进程启动")
     try:
-        _invoke(status["freecad"], script_path, spec_n["timeout_s"])
-    except subprocess.TimeoutExpired as e:
+        _invoke(status["freecad"], script_path, spec_n["timeout_s"],
+                should_cancel=should_cancel, progress=progress,
+                result_path=result_path)
+    except subprocess.TimeoutExpired as e:   # stubbed _invoke (tests)
         raise FEAError(
             f"FEA 求解超时（>{spec_n['timeout_s']:.0f}s），可通过 spec.timeout_s "
             f"上调；任务已终止。", kind="timeout") from e

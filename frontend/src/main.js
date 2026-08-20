@@ -4,6 +4,7 @@ import { AssemblyTree } from './tree.js';
 import {
   getToken, setToken, parseAssembly, editAssembly, listVersions,
   checkoutVersion, auditAssembly, importDrawing,
+  getPlugins, startFeaJob, startRenderJob, getJob, cancelJob,
 } from './api.js';
 
 // ---- token 引导：URL ?token= 一次性注入 localStorage（本地单用户工具约定）----
@@ -183,6 +184,223 @@ $('#drawing-load').addEventListener('click', async () => {
     });
   } catch (err) {
     msg.textContent = `错误：${err.message}`;
+  }
+});
+
+// ---- 插件状态面板（D5/D7 探测 + 优雅降级） ----
+const PLUGIN_DEFS = [
+  { key: 'oda', name: '图纸转换 ODA', what: 'DWG → DXF 转换（图纸对照）' },
+  { key: 'fea', name: '力学分析 FEA', what: 'FreeCAD + CalculiX（静力学）' },
+  { key: 'blender', name: '离线渲染 Blender', what: 'Cycles 静止帧渲染' },
+];
+let pluginsState = null;
+
+async function refreshPlugins() {
+  const list = $('#plugin-list');
+  try {
+    pluginsState = await getPlugins();
+  } catch {
+    pluginsState = null;
+    list.innerHTML = '<div class="plug-row"><span class="plug-state err">探测失败（服务不可达）</span></div>';
+    return;
+  }
+  list.innerHTML = '';
+  for (const def of PLUGIN_DEFS) {
+    const st = pluginsState[def.key] || {};
+    const row = document.createElement('div');
+    row.className = 'plug-row';
+    const dot = document.createElement('span');
+    dot.className = `plug-dot${st.available ? ' on' : ''}`;
+    const name = document.createElement('span');
+    name.className = 'plug-name';
+    name.textContent = def.name;
+    const state = document.createElement('span');
+    state.className = `plug-state${st.available ? '' : ' off'}`;
+    state.textContent = st.available ? '可用' : '未安装';
+    row.append(dot, name, state);
+    row.title = st.available
+      ? `${def.what}\n${st.path || st.freecad || st.blender || ''}`
+      : (st.hint || def.what);
+    list.appendChild(row);
+  }
+}
+$('#plug-refresh').addEventListener('click', () => {
+  refreshPlugins();
+  status('插件重新探测中…');
+});
+refreshPlugins();
+
+// ---- R5 任务卡片：进度 + 取消（FEA / 渲染共用） ----
+const jobCard = $('#job-card');
+const jobTitle = $('#job-title');
+const jobPhase = $('#job-phase');
+const jobBar = $('#job-bar');
+const jobBarFill = $('#job-bar-fill');
+const jobDetail = $('#job-detail');
+const jobResult = $('#job-result');
+const jobCancelBtn = $('#job-cancel');
+let activeJob = null;   // { id, kind, timer }
+
+const PHASE_LABELS = {
+  queued: '排队中', probe: '探测插件', prepare: '生成脚本', cache: '缓存命中',
+  interpreter: 'FreeCAD 启动', geometry: '载入几何', faces: '选定约束面',
+  setup: 'FEM 设置', mesh: '网格划分', solve: '求解中', post: '读取结果',
+  render: '渲染中', done: '完成',
+};
+
+function renderJobCard(job) {
+  const { progress = {}, status } = job;
+  const pct = progress.percent;
+  jobPhase.textContent = `${PHASE_LABELS[progress.phase] || progress.phase || status}`
+    + (typeof pct === 'number' ? ` · ${Math.round(pct)}%` : '');
+  if (typeof pct === 'number') {
+    jobBar.classList.remove('indeterminate');
+    jobBarFill.style.width = `${Math.min(100, Math.max(0, pct))}%`;
+  } else {
+    jobBar.classList.add('indeterminate');
+    jobBarFill.style.width = '';
+  }
+  jobDetail.textContent = progress.detail || '';
+  jobCancelBtn.style.display = (status === 'queued' || status === 'running') ? '' : 'none';
+}
+
+function stopJobPolling() {
+  if (activeJob?.timer) clearInterval(activeJob.timer);
+  activeJob = null;
+}
+
+function showJobError(job) {
+  jobResult.innerHTML = '';
+  const el = document.createElement('div');
+  el.className = 'jr-err';
+  el.textContent = job.status === 'cancelled'
+    ? '已取消（几何与缓存不受影响）' : `失败：${job.error || '未知错误'}`;
+  jobResult.appendChild(el);
+}
+
+function showFeaResult(res) {
+  jobResult.innerHTML = '';
+  const fmt = (v, unit) => (v == null ? '—' : `${(+v).toFixed(4)} ${unit}`);
+  const mk = (label, val) => {
+    const row = document.createElement('div');
+    row.className = 'jr-row';
+    const k = document.createElement('span');
+    k.textContent = label;
+    const v = document.createElement('span');
+    v.textContent = val;
+    row.append(k, v);
+    jobResult.appendChild(row);
+  };
+  mk('最大位移', fmt(res.max_displacement_mm, 'mm'));
+  mk('最大 von Mises', fmt(res.max_von_mises_MPa, 'MPa'));
+  mk('网格', res.mesh_nodes != null ? `${res.mesh_nodes} 节点 / ${res.mesh_elements} 单元` : '—');
+  if (res.cache_hit) mk('缓存', '命中（force 可重算）');
+  if (res.duration_s != null) mk('耗时', `${res.duration_s}s`);
+}
+
+function showRenderResult(res) {
+  jobResult.innerHTML = '';
+  const ok = document.createElement('div');
+  ok.className = 'jr-ok';
+  ok.textContent = `完成：${res.engine || 'renderer'} · ${res.objects ?? '?'} 对象`
+    + (res.duration_s != null ? ` · ${res.duration_s}s` : '');
+  jobResult.appendChild(ok);
+  // 打开渲染结果弹窗（图片走同源静态服务）
+  const modal = $('#render-modal');
+  $('#render-view').innerHTML = `<img src="${res.png_url}" alt="render" />`;
+  $('#render-meta').textContent = res.png_url;
+  modal.classList.remove('hidden');
+}
+
+const renderModal = $('#render-modal');
+$('#render-close').addEventListener('click', () => renderModal.classList.add('hidden'));
+renderModal.addEventListener('click', (e) => {
+  if (e.target === renderModal) renderModal.classList.add('hidden');
+});
+
+async function trackJob(started, kind, label) {
+  if (activeJob) {
+    status('已有任务在进行（见右下角卡片，可取消后再发起新任务）', true);
+    return;
+  }
+  activeJob = { id: started.job_id, kind, timer: null };
+  jobTitle.textContent = label;
+  jobResult.innerHTML = '';
+  jobDetail.textContent = '';
+  jobPhase.textContent = '排队中';
+  jobBar.classList.add('indeterminate');
+  jobCard.classList.remove('hidden');
+  status(`${label}已提交（任务 ${started.job_id.slice(0, 8)}）`);
+
+  const poll = async () => {
+    let job;
+    try {
+      job = await getJob(activeJob.id);
+    } catch {
+      return;   // 瞬时网络问题：下个周期重试
+    }
+    renderJobCard(job);
+    if (job.status === 'done') {
+      stopJobPolling();
+      if (kind === 'fea') showFeaResult(job.result);
+      else showRenderResult(job.result);
+      status(`${label}完成`);
+    } else if (job.status === 'error' || job.status === 'cancelled') {
+      stopJobPolling();
+      showJobError(job);
+      status(`${label}${job.status === 'cancelled' ? '已取消' : '失败'}`, true);
+    }
+  };
+  activeJob.timer = setInterval(poll, 800);
+  poll();
+}
+
+jobCancelBtn.addEventListener('click', async () => {
+  if (!activeJob) return;
+  jobCancelBtn.disabled = true;
+  try {
+    await cancelJob(activeJob.id);
+    jobPhase.textContent = '正在取消…';
+  } catch (err) {
+    status(`取消失败：${err.message}`, true);
+  } finally {
+    jobCancelBtn.disabled = false;
+  }
+});
+
+// ---- 力学分析（D7 FEA 插件，选中零件 → 模板级静力学场景） ----
+$('#btn-fea').addEventListener('click', async () => {
+  if (!lastCacheKey) { status('先加载装配体', true); return; }
+  if (pluginsState && pluginsState.fea && !pluginsState.fea.available) {
+    status(pluginsState.fea.hint || 'FEA 插件未安装', true);
+    return;
+  }
+  const rec = selectedId && tree.nodes.get(selectedId);
+  if (!rec || rec.node.type !== 'part') {
+    status('先在装配树或视口中选择一个零件（分析对象）', true);
+    return;
+  }
+  const tid = scene.templateOf(selectedId);
+  try {
+    const started = await startFeaJob(lastCacheKey, tid);
+    trackJob(started, 'fea', `力学分析 ${rec.node.name}`);
+  } catch (err) {
+    status(`提交失败：${err.message}`, true);
+  }
+});
+
+// ---- 离线渲染（D7 Blender 插件，整个装配体当前状态） ----
+$('#btn-render').addEventListener('click', async () => {
+  if (!lastCacheKey) { status('先加载装配体', true); return; }
+  if (pluginsState && pluginsState.blender && !pluginsState.blender.available) {
+    status(pluginsState.blender.hint || 'Blender 插件未安装', true);
+    return;
+  }
+  try {
+    const started = await startRenderJob(lastCacheKey);
+    trackJob(started, 'render', '离线渲染');
+  } catch (err) {
+    status(`提交失败：${err.message}`, true);
   }
 });
 

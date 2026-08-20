@@ -71,6 +71,13 @@
           </div>
           <div id="fp-list"></div>
         </div>
+        <div id="plugin-panel">
+          <div class="fp-head">
+            <span>插件状态</span>
+            <button id="plug-refresh" title="重新探测">↻</button>
+          </div>
+          <div id="plugin-list"></div>
+        </div>
       </aside>
       <main id="viewport">
         <div id="toolbar">
@@ -92,6 +99,8 @@
           <div class="tb-group">
             <button id="btn-audit" title="一键体检：干涉 + DFM 可制造性检查">体检</button>
             <button id="btn-drawing" title="导入 DXF/DWG 图纸对照（D5）">图纸</button>
+            <button id="btn-fea" title="对选中零件做 CalculiX 静力学分析（D7 插件，R5 任务化）">力学</button>
+            <button id="btn-render" title="Blender 离线渲染当前装配体（D7 插件，R5 任务化）">渲染</button>
             <button id="btn-cam-save" title="保存当前视角">存视角</button>
             <button id="btn-cam-restore" title="恢复已存视角">回视角</button>
             <button id="btn-view-reset" title="复位视图（爆炸/显隐/临时移动/相机）">复位视图</button>
@@ -124,6 +133,30 @@
               <div id="drawing-semantics"></div>
             </div>
           </div>
+        </div>
+      </div>
+      <div id="render-modal" class="hidden">
+        <div id="render-card">
+          <div class="fp-head">
+            <span>离线渲染</span>
+            <button id="render-close" title="关闭">×</button>
+          </div>
+          <div id="render-body">
+            <div id="render-view"></div>
+            <div id="render-meta"></div>
+          </div>
+        </div>
+      </div>
+      <div id="job-card" class="hidden">
+        <div class="fp-head">
+          <span id="job-title">任务</span>
+          <button id="job-cancel" title="取消任务">×</button>
+        </div>
+        <div id="job-body">
+          <div id="job-phase">排队中</div>
+          <div id="job-bar"><div id="job-bar-fill"></div></div>
+          <div id="job-detail"></div>
+          <div id="job-result"></div>
         </div>
       </div>
     </div>

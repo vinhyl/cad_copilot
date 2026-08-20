@@ -5,6 +5,37 @@
 
 ## [未发布]
 
+### 新增 (Added)（R5 任务协议 + 前端插件状态 UI）
+- **`cad_jobs.py` JobManager（R5 长任务异步）**：内存任务注册表——
+  `submit(kind, fn)` 立即返回 job id，工作线程执行；`ctx.report(phase,
+  percent, detail)` 流式进度（percent=None 表示不确定进度）；`ctx.
+  should_cancel()` + `ctx.on_terminate(hook)` 协作取消（hook 兜底：卡死
+  子进程也能被 terminate）；生命周期 queued → running → done | error |
+  cancelled（取消与自然完成的竞态以用户取消为准）；完成历史封顶保留
+  最新 50 条（GC）。
+- **插件子进程 Popen 化（协作取消 + 真实进度）**：`cad_fea._invoke` /
+  `cad_render._invoke` 从 `subprocess.run` 改为 Popen + 0.2s 轮询——
+  取消 → terminate（5s 宽限后 kill）；FEA 轮询时**读取内层脚本每个
+  阶段 flush 到 result.json 的进度**并按 interpreter/geometry/faces/
+  setup/mesh/solve/post 映射为 10–95% 真实进度条；stdout/stderr 走
+  DEVNULL（CalculiX 输出不会撑爆管道死锁）。
+- **服务层 R5 端点**：`POST /api/fea/static` 与 `POST /api/render` 增加
+  `"async": true`（202 + job_id，同步路径保持兼容）；`GET /api/jobs/{id}`
+  任务快照（状态/进度/结果/错误）；`GET /api/jobs` 列表；`POST
+  /api/jobs/{jid}/cancel` 幂等取消；同步路径补 `cancelled → 409` 映射。
+- **前端插件状态面板（D5/D7 探测可视化）**：侧栏底部常驻"插件状态"
+  （ODA / FEA / Blender 绿点=可用、灰点=未安装，悬停显示路径或安装
+  提示，↻ 重新探测）；工具栏新增"力学""渲染"按钮（插件不可用时前置
+  拦截并显示 hint）。
+- **前端任务卡片（进度 + 取消 + 结果）**：右下角悬浮卡片——阶段名
+  （中文映射）+ 百分比/不确定动画进度条 + detail + 取消按钮；FEA 完成
+  显示最大位移 / 最大 von Mises / 网格规模；渲染完成弹出结果窗口
+  （PNG 走同源静态服务）；轮询 800ms，单任务追踪。
+- **测试（+18，全套 187 绿）**：JobManager 生命周期/进度/协作取消/
+  终止钩子/取消竞态/GC；真实子进程取消与阶段进度中继（sys.executable
+  模拟 FreeCAD/Blender）；异步端点契约（202/job 轮询到 done、协作取消
+  到 cancelled、错误捕获、鉴权与 404）。
+
 ### 新增 (Added)（Phase D 插件框架：FEA / Blender 渲染，代码先行不装依赖）
 - **`cad_fea.py` FEA 插件框架（D6/D7）**：CalculiX 静力学单场景（轴向固定
   底面 + 顶面受压），FreeCAD **headless 子进程隔离**（主进程永不 import

@@ -435,3 +435,153 @@ html, body {
   padding: 1px 8px;
   margin-right: 6px;
 }
+
+/* ---- 插件状态面板（D5/D7 探测 + 优雅降级） ---- */
+#plugin-panel {
+  border-top: 1px solid #2c2c33;
+  display: flex;
+  flex-direction: column;
+  flex: none;
+}
+#plug-refresh {
+  border: none;
+  background: none;
+  color: #7a7a88;
+  font-size: 14px;
+  cursor: pointer;
+}
+.plug-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 12px;
+  font-size: 12px;
+  cursor: default;
+}
+.plug-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #5a5a66;
+}
+.plug-dot.on {
+  background: #2a7d3b;
+  box-shadow: 0 0 5px rgba(42, 125, 59, 0.8);
+}
+.plug-name { color: #cfcfd8; flex: 1; }
+.plug-state { flex: none; color: #6fd08c; font-size: 11px; }
+.plug-state.off { color: #7a7a88; }
+.plug-state.err { color: #ff9d94; }
+
+/* ---- R5 任务卡片（进度 + 取消，右下角悬浮） ---- */
+#job-card {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  width: 300px;
+  background: rgba(24, 24, 29, 0.96);
+  border: 1px solid #33333c;
+  border-radius: 10px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.5);
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+#job-card.hidden { display: none; }
+#job-card .fp-head { border-bottom: 1px solid #2c2c33; }
+#job-cancel {
+  border: none;
+  background: none;
+  color: #ff9d94;
+  font-size: 14px;
+  cursor: pointer;
+}
+#job-body {
+  padding: 10px 14px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+#job-phase { font-size: 12px; color: #cfcfd8; }
+#job-bar {
+  height: 6px;
+  border-radius: 3px;
+  background: #2c2c33;
+  overflow: hidden;
+}
+#job-bar-fill {
+  height: 100%;
+  width: 0;
+  background: #4a7dff;
+  transition: width 0.3s ease;
+}
+#job-bar.indeterminate #job-bar-fill {
+  width: 30%;
+  animation: job-slide 1.2s infinite linear;
+  transition: none;
+}
+@keyframes job-slide {
+  from { transform: translateX(-110%); }
+  to { transform: translateX(400%); }
+}
+#job-detail {
+  font-size: 11px;
+  color: #8a8f98;
+  min-height: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+#job-result { display: flex; flex-direction: column; gap: 4px; }
+.jr-row {
+  display: flex;
+  justify-content: space-between;
+  font-size: 12px;
+  color: #cfcfd8;
+}
+.jr-row span:first-child { color: #a0a0aa; }
+.jr-ok { font-size: 12px; color: #6fd08c; }
+.jr-err { font-size: 12px; color: #ff9d94; }
+
+/* ---- 渲染结果弹窗（Blender 静止帧） ---- */
+#render-modal {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 50;
+}
+#render-modal.hidden { display: none; }
+#render-card {
+  width: min(880px, 92vw);
+  max-height: 86vh;
+  display: flex;
+  flex-direction: column;
+  background: #1e1e23;
+  border: 1px solid #33333c;
+  border-radius: 12px;
+  overflow: hidden;
+}
+#render-card .fp-head { border-bottom: 1px solid #2c2c33; }
+#render-view {
+  background: #141418;
+  overflow: auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 200px;
+}
+#render-view img { max-width: 100%; max-height: 72vh; display: block; }
+#render-meta {
+  padding: 6px 14px;
+  font-size: 11px;
+  color: #7a7a88;
+  border-top: 1px solid #2c2c33;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
