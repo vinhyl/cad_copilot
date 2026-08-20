@@ -13,6 +13,11 @@ After that, run the tools with the venv's python, e.g.:
 
 three.js is vendored under ./vendor/ and needs no network; only the Python
 deps below require a one-time PyPI fetch.
+
+MCP wiring is intentionally NOT done here: registering the ``cad-engine``
+server is the job of the agent/client that will actually use it (it knows its
+own config location and format). See README "MCP Server 使用" for the snippet
+the deploying agent should add after bootstrap finishes.
 """
 from __future__ import annotations
 
@@ -51,8 +56,10 @@ def main() -> int:
     print("[bootstrap] 安装依赖 (requirements.txt) …")
     subprocess.check_call([pip, "install", "-r", os.path.join(HERE, "requirements.txt")])
 
-    print("\n[bootstrap] 完成。试跑示例：")
-    print(f"  {python} feature_picker.py selftest.step --out-dir previews")
+    print("\n[bootstrap] 完成。下一步：")
+    print(f"  - 试跑示例：{python} feature_picker.py selftest.step --out-dir previews")
+    print("  - 接入 MCP：由部署用的 agent 把 cad-engine 登记进它自己的客户端配置")
+    print("    （见 README 「MCP Server 使用」的连接片段；登记后仍需在客户端点 Trust 启用）")
     return 0
 
 

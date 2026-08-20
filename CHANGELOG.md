@@ -39,6 +39,11 @@
   路径围栏 / 非法扩展名 400 / 文件名穿越净化。
 
 ### 修复 (Fixed)（ODA 探测与调用）
+- **macOS 探测漏检**：`probe_oda_converter` 原先只搜 Windows 目录与 3 个
+  Linux 路径，**完全漏掉 macOS**——已安装的 `/Applications/ODAFileConverter.app/
+  Contents/MacOS/ODAFileConverter` 永远扫不到，插件面板显示灰点。新增
+  `_ODA_MAC_DIRS`（`/Applications`、`~/Applications`）glob `ODAFileConverter*.app/
+  Contents/MacOS/ODAFileConverter`，并在候选直连路径补 macOS 位置。
 - **探测漏检新版本**：`probe_oda_converter` 从硬编码 23/24/25 三个精确
   路径改为 glob 任意版本目录（`ODAFileConverter*\ODAFileConverter.exe`，
   多版本取最新），补 `C:\Program Files (x86)\ODA`，新增 `CAD_ODA_EXE`

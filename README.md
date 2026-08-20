@@ -20,6 +20,38 @@ python bootstrap.py
 
 Windows 与 macOS 上命令**完全相同**；仅首次运行需联网。
 
+`bootstrap.py` 只负责环境（venv + 依赖）。**部署阶段还需由 agent 把 `cad-engine`
+接入所用客户端**（见下文「MCP Server 使用」的连接片段）；登记后需在客户端点
+**Trust** 启用，agent 才能调用那 10 个 CAD 工具（`build123d_model` 默认禁用）。
+
+### 部署阶段：ODA 插件（DWG 支持，默认启用）
+
+ODA File Converter 是**默认启用**的插件——DWG 图纸经它转换后导入（DXF 无需它）。
+部署阶段，agent 应先探测 ODA 是否已就位：
+
+```bash
+venv/bin/python -c "import cad_drawing; print(cad_drawing.probe_oda_converter())"
+```
+
+返回路径即已安装；`None` 表示缺失。
+
+若缺失，agent **告知用户**：使用 DWG 图纸需安装 ODA File Converter（Open Design Alliance
+提供的免费工具，官网**免注册直链下载**），下载页：
+https://www.opendesign.com/guestfiles/oda_file_converter 。用户同意后，agent **全自动完成
+下载与安装**（无需用户手动操作）：
+
+- **macOS**：从下载页取对应架构（Apple 芯片 arm64 / Intel x64）的 `.dmg` 直链，下载后挂载
+  并拷贝 `ODAFileConverter*.app` 到 `/Applications`（或取 `.pkg` 直链安装）；
+- **Linux**：取 RPM / DEB / AppImage 直链，按发行版安装；
+- **Windows**：取 x64 安装包直链，运行安装程序。
+
+安装后重新运行上面的探测命令确认返回路径（前端插件面板 ODA 转绿点）。
+
+**面向非技术用户（小白引导）**：用大白话说明，不要丢命令给用户。例如：
+"DWG 是 AutoCAD 的图纸格式，需要装一个免费小工具才能打开；你不用自己下载，
+点头我就帮你装好，装完就能看 DWG 了。"用户只需回"装"或"先不装"，下载/安装
+全程由 agent 执行，不在对话里暴露终端操作。
+
 ## 快速开始：生成拾取预览
 ```bash
 venv/Scripts/python feature_picker.py your_model.step --out-dir previews   # Windows
@@ -41,22 +73,33 @@ venv/bin/python        cad_mcp_server.py    # macOS / Linux
 ```
 默认从标准输入/输出以 JSON-RPC 通信，由 MCP 客户端（如 WorkBuddy）拉起，无需手动常驻。
 
-### 接入 WorkBuddy（mcp.json 示例）
-在 WorkBuddy 的 MCP 配置（`mcp.json`）中加入：
+### 接入（由部署用的 agent 完成）
+
+`cad_mcp_server.py` 是标准 MCP stdio server，任何支持 MCP 的客户端都能用，
+**server 代码零改动**。需要接入时，部署用的 agent 把下面这段 `cad-engine` 条目写进
+**它自己**的客户端配置即可（各客户端路径/格式不同，位置见下）。推荐用绝对路径，
+并把可访问目录约束在工程根目录：
+
 ```json
 {
   "mcpServers": {
     "cad-engine": {
-      "command": "venv/Scripts/python",
-      "args": ["cad_mcp_server.py"]
+      "command": "/abs/path/to/cad_copilot/venv/bin/python",
+      "args": ["/abs/path/to/cad_copilot/cad_mcp_server.py"],
+      "env": { "CAD_MCP_ALLOWED_DIRS": "/abs/path/to/cad_copilot" },
+      "disabled": false
     }
   }
 }
 ```
-> macOS / Linux 把 `command` 换成 `venv/bin/python`。路径相对于仓库根目录；若 server 在
-> 其他目录，请写绝对路径或先 `cd` 到仓库根。
 
-### 8 个工具一览
+> Windows 把 `command` 改成 `venv\\Scripts\\python.exe`。各客户端配置位置示例：
+> WorkBuddy `~/.workbuddy/mcp.json`、Claude Desktop
+> `~/Library/Application Support/Claude/claude_desktop_config.json`、Cursor
+> `~/.cursor/mcp.json`、VS Code `.vscode/mcp.json`（键名/结构不同，需按该客户端格式适配）。
+> 写入后仍需在客户端点 **Trust** 启用。
+
+### 11 个工具一览
 | 工具 | 说明 | 默认状态 |
 |------|------|---------|
 | `convert_file` | STEP/IGES/STL/BREP 格式互转 | ✅ 启用 |

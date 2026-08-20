@@ -33,10 +33,15 @@ _ODA_WIN_DIRS = [
     r"C:\Program Files\ODA",
     r"C:\Program Files (x86)\ODA",
 ]
+_ODA_MAC_DIRS = [
+    "/Applications",
+    os.path.expanduser("~/Applications"),
+]
 _ODA_CANDIDATES = [
     "/usr/bin/ODAFileConverter",
     "/usr/local/bin/ODAFileConverter",
     "/opt/ODAFileConverter/ODAFileConverter",
+    "/Applications/ODAFileConverter.app/Contents/MacOS/ODAFileConverter",
 ]
 
 # --- semantic patterns (模块六: threads / diameters / tolerances) --------
@@ -63,6 +68,11 @@ def probe_oda_converter() -> str | None:
     for base in _ODA_WIN_DIRS:
         hits = glob.glob(os.path.join(base, "ODAFileConverter*",
                                       "ODAFileConverter.exe"))
+        if hits:
+            return max(hits)  # newest version sorts last lexically
+    for base in _ODA_MAC_DIRS:
+        hits = glob.glob(os.path.join(base, "ODAFileConverter*.app",
+                                      "Contents", "MacOS", "ODAFileConverter"))
         if hits:
             return max(hits)  # newest version sorts last lexically
     for p in _ODA_CANDIDATES:
