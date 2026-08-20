@@ -298,8 +298,19 @@ Blender headless 渲染为可选插件；FEA 先做 CalculiX 静力学单场景�
 保留 v0.1.0 已落地的全部安全机制，并叠加服务化新增项：
 
 - **保留**：`CAD_MCP_ALLOWED_DIRS` 路径白名单、`build123d_model` 默认禁用 +
-  超时沙箱子进程、HTML 生成统一转义、vendor SHA-256 校验（缺文件即报错不静默联网）；
-- **新增**：Web 服务仅绑定 127.0.0.1、本地 token 鉴权、CORS 收紧。
+  超时沙箱子进程；
+- **新增**：Web 服务仅绑定 127.0.0.1、本地 token 鉴权、CORS 收紧；
+- **退役（2026-08-20，静态预览出口清理）**：v0.1.0 的三个"生成静态 HTML
+  预览"CLI 出口（`make_preview` 整体预览 / `feature_locator` 2D 定位图 /
+  `feature_picker` 离线拾取页）随 Web 视口落地整体退役——交互式拾取/预览
+  由 `/app` 实时承担，agent 经 `?load=` URL 直达。连带退役：`vendor/`
+  three.js 本地化目录（其唯一消费者是静态 HTML；Web 前端经 npm 锁定版本
+  + dist 提交，离线性不受影响）、`previews/` 产物目录、cad_core 的
+  `html_escape_text`/`json_for_script`（消费者随 HTML 出口消失；图纸 SVG
+  文本转义内联于 cad_drawing）。`feature_locator`/`feature_picker` 保留为
+  纯特征识别/枚举库（cad_service 特征缓存上游）；MCP `pick_features` 改为
+  纯结构化返回（稳定 id 与 Web 视口拾取同源，不再写 HTML 文件）。
+  原"vendor SHA-256 校验"保留项由此移除。
 - **演进（2026-08-20，输入通道决策）**：白名单语义 = "字符串路径尝试读"，
   只防意外不构成授权；用户亲手交付文件 = **显式授权**，语义不同——
   `POST /api/upload`（原始请求体流式落盘，文件名仅取 basename + 净化）与

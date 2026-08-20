@@ -15,39 +15,9 @@ a missing optional binding never breaks the whole import.
 """
 from __future__ import annotations
 
-import html
-import json
 import os
 import threading
 from OCP.TopoDS import TopoDS_Shape
-
-
-def html_escape_text(s) -> str:
-    """Escape a string for safe embedding in HTML/XML text or attributes.
-
-    Wraps html.escape(quote=True) so the result is safe inside element text and
-    double-quoted attributes alike. Every user-derived string (file names,
-    feature names, labels) MUST pass through this before HTML interpolation to
-    prevent stored XSS via a maliciously named CAD file.
-    """
-    return html.escape(str(s), quote=True)
-
-
-def json_for_script(obj) -> str:
-    """Serialize obj to JSON that is safe to embed inside a <script> block.
-
-    Beyond json.dumps(ensure_ascii=False) this neutralises the characters that
-    can break out of (or break) a <script> context:
-      - '</' -> '<\\/'  (prevents a literal </script> from closing the block)
-      - '<'  -> '\\u003c', '>' -> '\\u003e', '&' -> '\\u0026'
-      - U+2028 / U+2029 -> '\\u2028' / '\\u2029' (illegal in JS string literals)
-    NOTE: the '</' replacement MUST run BEFORE the '<' replacement.
-    """
-    s = json.dumps(obj, ensure_ascii=False)
-    s = s.replace("</", "<\\/")
-    s = s.replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
-    s = s.replace("\u2028", "\\u2028").replace("\u2029", "\\u2029")
-    return s
 
 
 # RLock: re-entrant for the SAME thread -- service-layer handlers already

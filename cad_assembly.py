@@ -72,7 +72,8 @@ def _sha256_file(path: str) -> str:
 
 
 def _deflection_for(shape) -> float:
-    """Size-relative deflection, same formula as make_preview/feature_picker
+    """Size-relative deflection, same formula as feature_picker's retired
+    mesh path / the historical make_preview
     (audit M2/A3: max(min(maxdim/800, 0.5), 1e-5))."""
     from OCP.Bnd import Bnd_Box
     from OCP.BRepBndLib import BRepBndLib

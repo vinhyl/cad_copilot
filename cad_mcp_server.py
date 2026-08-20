@@ -236,26 +236,36 @@ def build123d_model(script: str, output_path: str) -> str:
 
 
 @mcp.tool()
-def pick_features(input_path: str, out_dir: str = "") -> str:
-    """Generate an interactive, clickable 3D feature-picking preview for a CAD file.
+def pick_features(input_path: str) -> str:
+    """Enumerate a CAD file's features as structured metadata (no files written).
 
-    Emits an HTML page where every feature is its own separately clickable mesh:
-    selecting a feature in the list (or clicking its surface in 3D) highlights it
-    with an x-ray overlay + orange edge outline, shows its properties, and can
-    auto-focus the camera. The page is fully offline -- three.js is vendored
-    locally under ./vendor/ next to the HTML.
+    Every feature — holes, bosses, fillets, bolt patterns, threads — comes back
+    with a stable id (#N / #N.k / P#), type, axis, radii, extent, location and
+    label. The same ids drive the Web viewport's interactive feature picking
+    (cad_service /app), so a chat-side "enlarge #3" unambiguously targets the
+    feature the user clicked in the browser. The historical static-HTML
+    preview outlet was retired; interactive picking lives in the Web UI.
 
     Args:
         input_path: path to source (.step/.stp/.igs/.iges/.stl/.brep)
-        out_dir: output folder for the HTML + vendored three.js; defaults to
-                 ./previews next to this server file
-    Returns: JSON with the HTML path, feature count, per-feature metadata, and
-             shape properties (volume / faces / edges / bounding-box size).
+    Returns: JSON with the feature count, per-feature metadata, and shape
+             properties (volume / faces / edges / bounding-box size).
     """
     import feature_picker  # lazy: only loaded when this tool is actually called
-    res = feature_picker.make_picker(_safe_path(input_path),
-                                     _safe_path(out_dir) if out_dir else None)
-    return json.dumps(res, ensure_ascii=False)
+    shape = cad_core.read_shape(_safe_path(input_path))
+    props = cad_core.properties(shape)
+    feats = [{k: v for k, v in f.items() if k != "solid"}
+             for f in feature_picker.collect_feature_solids(shape)]
+    return json.dumps({
+        "feature_count": len(feats),
+        "features": [{"id": f["id"], "gid": f["gid"], "ring": f["ring"],
+                      "type": f["type"], "radii": f["radii"],
+                      "axis": f["axis"]} for f in feats],
+        "props": {"volume": props["volume"],
+                  "faces": props["topology"]["faces"],
+                  "edges": props["topology"]["edges"],
+                  "size": props["bounding_box"]["size"]},
+    }, ensure_ascii=False)
 
 
 @mcp.tool()

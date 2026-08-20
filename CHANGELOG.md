@@ -5,6 +5,29 @@
 
 ## [未发布]
 
+### 移除 (Removed)（静态预览出口清理）
+- **退役三个"生成静态 HTML 预览"的 CLI 出口**：`make_preview.py`（整体预览页）、
+  `feature_locator.py` 的 2D 定位图出口、`feature_picker.py` 的离线拾取页出口。
+  Web 视口（`/app`）落地后，交互式 3D 拾取、特征面板、整体预览均由前端实时
+  承担（agent 侧经 `?load=` URL 直达），静态 HTML 出口无存在必要——
+  `make_preview.py` 整文件删除（-170 行）。
+- **`feature_locator.py` / `feature_picker.py` 保留为纯特征识别/枚举库**：核心
+  API（`collect_features` / `group_features` / `detect_patterns` /
+  `collect_feature_solids`）原样保留——它们是 cad_service 特征缓存
+  （`features/tN.json` + `tN.gltf`）的上游；删除的是 HTML 生成、2D 标签布点
+  （`project_edges` / `place_labels` / `build_html`）与 vendor 资产嵌入代码
+  （两文件合计 -975 行）。
+- **MCP `pick_features` 改纯结构化返回**：不再写 HTML 文件，直接返回特征
+  元数据 JSON（稳定 id #N / #N.k / P#，与 Web 视口拾取同源）+ 体积/拓扑/
+  包围盒属性摘要。
+- **移除 `vendor/` three.js 本地化目录**（-670 KB）：Web 前端改由 npm 锁定
+  版本 + `dist/` 构建产物提交承担；`cad_core` 内 vendor SHA-256 校验逻辑
+  与 `previews/` 旧产物目录随之删除。
+- **CI / 测试适配**：冒烟步骤 `feature_picker.py` CLI 替换为 `selftest.py`
+  （OCP 读/属性/转换，样本再生语义：写前删旧文件防覆盖保护误触发）与
+  `pick_features` MCP 工具结构化断言；删除 `tests/test_feature_picker_html.py`，
+  pytest 覆盖配置同步更新。净变化 **-1315 行**（19 个文件）。
+
 ### 新增 (Added)（文件输入交互：上传 / 拖放 / 最近使用）
 - **`POST /api/upload`（显式授权输入通道）**：原始请求体流式落盘
   `workspace/uploads/`，**内容寻址**（流式 SHA-256 → `uploads/<hash>/

@@ -88,15 +88,14 @@ def test_selftest_scale_golden(selftest_scale):
     assert st.get("plane") == 6
 
 
-def test_feature_picker_build_runs(selftest_step):
-    """feature_picker.build() sits on top of the locator; ensure it produces
-    a non-empty feature list with ids."""
+def test_feature_picker_collect_runs(selftest_step):
+    """feature_picker.collect_feature_solids sits on top of the locator;
+    ensure it produces a non-empty feature list with ids + solids."""
     import feature_picker
     shape = cad_core.read_shape(selftest_step)
-    _, feats, props = feature_picker.build(shape)
+    feats = feature_picker.collect_feature_solids(shape)
     assert feats
-    assert all("id" in f for f in feats)
-    assert props["volume"] > 0
+    assert all("id" in f and "solid" in f for f in feats)
 
 
 def test_selftest_fillet_locator(selftest_fillet):

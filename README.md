@@ -2,14 +2,15 @@
 
 > 版本：**v0.1.0** — 变更记录见 [CHANGELOG.md](CHANGELOG.md)
 
-离线 CAD 特征拾取 / 预览工具链。把 STEP/IGES 模型每个特征切成独立 STL 网格，
-生成**可点击拾取**的 3D HTML 预览（three.js 已本地化 vendored，离线可用），并提供
-MCP server 供其他 agent 调用。
+本地 AI CAD Copilot 工具链：`cad_service.py`（Web 服务：3D 装配视口 + 特征拾取 +
+编辑闭环 + 图纸对照 + FEA/渲染任务），配套 MCP server 供 agent 以 stdio 调用同一套
+几何能力（双 transport，共享库层与缓存）。所有交互界面集中在 Web 前端
+（`/app`）；历史上"生成静态 HTML 预览"的三个 CLI 出口已随 Web UI 落地而退役。
 
 ## 环境要求
 - Python 3.13（3.12+ 一般也可，但 OCP 轮子按 3.13 验证；`cadquery-ocp-novtk` / `build123d` 已确认有 cp313 wheel 可用）
 - Windows / macOS / Linux
-- 首次部署需联网从 PyPI 拉取 Python 依赖（`bootstrap.py` 处理）；three.js 已随仓库 vendored，预览本身无需联网
+- 首次部署需联网从 PyPI 拉取 Python 依赖（`bootstrap.py` 处理）；运行期全部离线
 
 ## 一键部署
 ```bash
@@ -52,13 +53,14 @@ https://www.opendesign.com/guestfiles/oda_file_converter 。用户同意后，ag
 点头我就帮你装好，装完就能看 DWG 了。"用户只需回"装"或"先不装"，下载/安装
 全程由 agent 执行，不在对话里暴露终端操作。
 
-## 快速开始：生成拾取预览
+## 快速开始：启动 Web 服务
 ```bash
-venv/Scripts/python feature_picker.py your_model.step --out-dir previews   # Windows
-venv/bin/python        feature_picker.py your_model.step --out-dir previews   # macOS / Linux
+venv/Scripts/python cad_service.py   # Windows（token 启动时打印）
+venv/bin/python        cad_service.py   # macOS / Linux
 ```
-生成的 `previews/your_model_拾取.html` 与同目录 `vendor/` 一起打开，**断网也能用**。
-更完整的命令行参数见下文「命令行速查」。
+浏览器打开 `http://127.0.0.1:8764/app?token=<启动时打印的 token>`——上传/拖入
+STEP 即得 3D 装配视口 + 特征拾取 + 编辑闭环。详见下文「本地 Web 服务」与
+「Web 前端」两节。
 
 ## MCP Server 使用
 
@@ -108,7 +110,7 @@ venv/bin/python        cad_mcp_server.py    # macOS / Linux
 | `create_primitive` | 生成基本体：box / cylinder | ✅ 启用 |
 | `edit_geometry` | 几何编辑：fillet / chamfer / scale / drill | ✅ 启用 |
 | `boolean_parts` | 布尔运算：fuse / cut / common | ✅ 启用 |
-| `pick_features` | 生成可点击的 3D 特征拾取预览（离线 HTML + vendor） | ✅ 启用 |
+| `pick_features` | 特征结构化枚举（稳定 id #N / #N.k / P#，与 Web 视口拾取同源；不写文件） | ✅ 启用 |
 | `parse_assembly` | 装配体 STEP → 装配树 + 4×4 矩阵 + 去重零件模板（glTF 缓存，Web 前端 Template+Matrix 数据源） | ✅ 启用 |
 | `check_interference` | 装配体全实例对布尔干涉审计（确定性守门，D8） | ✅ 启用 |
 | `audit_assembly` | 一键体检：干涉 + DFM 规则（小孔/深孔/薄壁，模块七） | ✅ 启用 |
@@ -165,7 +167,7 @@ venv/Scripts/python cad_service.py     # http://127.0.0.1:8764（token 启动时
 
 ## Web 前端（Phase A/B）
 
-`frontend/` 为 Vite + three.js（版本与 `vendor/` 一致：three@0.160.0）+ 原生 JS 的
+`frontend/` 为 Vite + three.js（three@0.160.0，npm 锁定版本）+ 原生 JS 的
 SPA：加载装配 STEP → **Template+Matrix 实例化渲染**（每个唯一零件一份 glTF
 几何，全部实例共享 `InstancedMesh`，矩阵来自 manifest 的累积世界 4×4）+ 装配树 UI
 （选择层级双向联动：树上点选高亮 3D 实例 / 视口点选定位树上节点；按节点显隐）。
@@ -223,7 +225,7 @@ SPA：加载装配 STEP → **Template+Matrix 实例化渲染**（每个唯一�
 
 - **使用（零 Node 依赖）**：`venv/Scripts/python cad_service.py` 后浏览器打开
   `http://127.0.0.1:8764/app/`，token 支持 `?token=...` 一次性注入。构建产物
-  `frontend/dist/` **随仓库提交**，与 `vendor/` 同哲学——分发时带走仓库即可离线运行。
+  `frontend/dist/` **随仓库提交**——分发时带走仓库即可离线运行。
 - **开发（需 Node 18+）**：`cd frontend && npm install`，之后 `npm run dev`
   （5173 端口，API/WS 代理到 8764，改源码热更新）；发布前 `npm run build` 并提交
   新的 `dist/`。
@@ -240,96 +242,50 @@ venv/Scripts/python mcp_test.py    # Windows
 
 ## 命令行速查
 
-三个脚本都通过仓库内的 `venv/` 运行。Windows 用 `venv/Scripts/python`，macOS/Linux 用 `venv/bin/python`。
-
-### `feature_picker.py` — 生成可点击 3D 拾取预览
-```bash
-python feature_picker.py <input> [--out-dir DIR]
-```
-- `input`（必填，位置参数）：源文件，支持 `.step/.stp/.igs/.iges/.stl/.brep`
-- `--out-dir DIR`（可选，默认 `previews`）：HTML 输出目录
-- 产出：`<基名>_拾取.html`（与同目录 `vendor/` 一起可离线打开）
-
-示例：
-```bash
-python feature_picker.py selftest.step --out-dir previews
-# -> previews/selftest_拾取.html
-```
-
-### `feature_locator.py` — 生成 2D 特征编号定位图
-```bash
-python feature_locator.py <input> [--axis auto] [--out-dir DIR]
-```
-- `input`（必填，位置参数）：源文件，支持 `.step/.stp/.igs/.iges/.stl/.brep`
-- `--axis {auto|x|y|z}`（可选，默认 `auto`）：2D 定位图的投影轴；`auto` 按模型主方向自动选
-- `--out-dir DIR`（可选，默认 `previews`）：HTML 输出目录
-- 产出：`<基名>_定位图.html`
-
-示例：
-```bash
-python feature_locator.py selftest.step --axis auto --out-dir previews
-# -> previews/selftest_定位图.html
-```
-
-### `make_preview.py` — 生成实体整体预览
-```bash
-python make_preview.py <input>
-```
-- `input`（必填，位置参数，仅通过 `sys.argv[1]` 传入，无 argparse 子选项）：源文件
-- 产出：`previews/<基名>_preview.html` 与 `previews/<基名>.stl`
-
-示例：
-```bash
-python make_preview.py selftest.step
-# -> previews/selftest_preview.html + previews/selftest.stl
-```
+历史版本有三个"生成静态 HTML 预览"的 CLI（`feature_picker.py` / `feature_locator.py` /
+`make_preview.py`）。**Web 前端落地后已全部退役**——交互式 3D 拾取、特征面板、整体
+预览都由 `cad_service.py` 的 `/app` 视口实时承担（agent 侧经 `?load=` URL 直达）。
+`feature_locator.py` 与 `feature_picker.py` 保留为**纯特征识别/枚举库**（cad_service
+特征缓存的上游），不再是 CLI。
 
 ## 输出产物与目录约定
 
-- `feature_picker.py` 产出 `<基名>_拾取.html`；`feature_locator.py` 产出 `<基名>_定位图.html`；
-  `make_preview.py` 产出 `<基名>_preview.html`（外加一个 `<基名>.stl` 网格）。
-- **HTML 与同目录 `vendor/` 的相对位置不能拆开**：生成时 three.js 会被复制到输出目录的
-  `vendor/` 下，HTML 用相对路径 `./vendor/` 引用它。移动/分发时务必把 HTML 与同级 `vendor/`
-  一起带走，否则离线预览无法加载 3D 库。
-- `vendor/` 随仓库**提交（git tracked）**，是从 CDN 固定版本（three@0.160.0）vendored 进来的，
-  **运行时不再从 CDN 下载**；`feature_picker` 启动时会用 SHA-256 校验 vendor 文件完整性。
-  （见 [vendor/README.md](vendor/README.md)）
-- 默认输出目录 `previews/` 属于**生成产物**，已被 `.gitignore` 忽略，不进版本库。
+所有运行期产物集中在 `workspace/`（内容寻址缓存，详见
+[docs/architecture/copilot-vision.md](docs/architecture/copilot-vision.md) 的
+「工作区目录架构」节）：
 
-典型输出目录树（以 `previews/` 为例）：
 ```
-previews/
-├── your_model_拾取.html      # feature_picker 产出（可点击 3D）
-├── your_model_定位图.html     # feature_locator 产出（2D 编号）
-├── your_model_preview.html   # make_preview 产出（整体）
-├── your_model.stl            # make_preview 产出的网格
-└── vendor/                   # 复制过来的 three.js（与 HTML 同级，不可拆分）
-    ├── three.module.min.js
-    ├── jsm/controls/OrbitControls.js
-    └── jsm/loaders/STLLoader.js
+workspace/
+├── uploads/<sha256>/<文件名>   # 上传通道落盘（内容寻址去重）
+├── cache/<sha16>/              # 装配解析缓存（tree_structure.json + gltf_library + features）
+├── drawings/<sha16>/           # 图纸缓存（ODA 转换 DXF + 渲染 SVG）
+├── fea/ render/                # FEA / Blender 任务产物
+└── versions/<sha16>/           # 增量版本历史（v0 基线 + v1..vN）
 ```
+
+`workspace/` 属于**生成产物**，已被 `.gitignore` 忽略，不进版本库。
 
 ## 目录结构
 - `cad_core.py` — OCP 核心（读 STEP/IGES、属性、包围盒、mesh/deflection 单一实现）
 - `cad_assembly.py` — 装配体解析（Phase A）：STEP → Template+Matrix manifest（装配树 / 世界矩阵 / 去重模板 / glTF 缓存布局，ADR-0002 D3）
 - `cad_service.py` — 本地 Web 服务层（Phase A 骨架，starlette）：HTTP + WS 双通道、token 鉴权、SHA 键控幂等缓存（ADR-0002 D2 / R4 / R8 / R17）
-- `feature_locator.py` — 曲面枚举 + 分类聚合 + 2D 编号定位图（Feature 模型 + 类型注册表）
-- `feature_picker.py` — 特征级 STL 切片 → 可点击 3D 预览（three.js 本地化 + SHA-256 校验）
-- `make_preview.py` — 实体整体预览
+- `feature_locator.py` — 特征识别库：曲面枚举 + 分类聚合 + 模式识别（Feature 模型 + 类型注册表）
+- `feature_picker.py` — 特征枚举库：`collect_feature_solids`（cad_service 特征缓存的上游，Web 视口拾取数据源）
 - `cad_mcp_server.py` — FastMCP server（**11 工具**；`pick_features` / `parse_assembly` / `check_interference` / `audit_assembly` 已接入；`build123d_model` 默认禁用）
 - `cad_versions.py` — 增量版本仓库（Phase C）：原子提交（R6）/ 解析链 / 指针回滚（D10）
 - `cad_drawing.py` — 图纸导入与语义校准（Phase D，D5/模块六）：DXF 直读 / DWG 经 ODA（探测降级）+ 螺纹/直径/公差提取 + 轻依赖 SVG 渲染
+- `cad_jobs.py` — R5 任务管理器：job 状态机 / 进度 / 协作式取消（FEA / 渲染长任务）
+- `cad_fea.py` / `cad_render.py` — FEA（FreeCAD+CalculiX）与渲染（Blender）子进程插件（探测降级 + 缓存 + 进度中继）
 - `evals/` — 评测基准集（D9）：指令三层标注 + `run_evals.py`（黄金轨迹回放 + 几何断言全自动化；LLM 对比层后续接入）
 - `cad_build.py` — build123d 字体 import-hook（跨平台无害，修复损坏系统字体导致 import 崩溃）
-- `vendor/` — 本地 three.js（three@0.160.0：`three.module.min.js` + `OrbitControls` + `STLLoader`）；见 [vendor/README.md](vendor/README.md)
 - `frontend/` — Web 前端 SPA（Vite + three.js，Phase A 骨架）；`dist/` 构建产物随仓库提交（离线运行无需 Node）
-- `tests/` — pytest 测试套件（Phase 3 建立；Phase A/B/C/D 增装配/服务层/编辑流/图纸用例，当前 **112 个用例全绿**）
+- `tests/` — pytest 测试套件（Phase 3 建立；Phase A/B/C/D 增装配/服务层/编辑流/图纸用例，当前 **185 个用例全绿**）
 - `pytest.ini` — pytest 配置（含 `--cov` 覆盖率）
 - `docs/architecture/copilot-vision.md` — Web Copilot 系统设想（原根目录 `设想.txt` 迁入；文首附与 ADR-0002 的差异摘要）
 - `docs/decisions/0001-ocp-vs-freecad-base.md` — ADR-0001：OCP 轻量底座 vs FreeCAD 方案对比（原 `comparison.md`）
 - `docs/decisions/0002-web-copilot-expansion.md` — ADR-0002：Web Copilot 扩展决策（D1–D10 + 延续约束 + 风险登记 R1–R17）
 - `CHANGELOG.md` — 版本变更记录（基线 v0.1.0）
-- `selftest*.step` / `selftest.iges` — 示例输入，用于冒烟测试
+- `selftest*.step` / `selftest.iges` — 示例输入（`selftest.py` 可再生），用于冒烟测试
 
 ## 同步更新
 本仓库即单一可信源。任意机器上：
@@ -344,20 +300,17 @@ python bootstrap.py      # 仅当依赖变更时需要重跑；代码更新直�
 ## 开发与测试
 
 ### 冒烟测试
-直接用示例输入跑脚本即可快速验证：
 ```bash
-python feature_picker.py selftest.step --out-dir previews
-python feature_locator.py selftest.step --axis auto --out-dir previews
-python make_preview.py selftest.step
+python selftest.py       # OCP 工具链端到端（建模 → 读写 → 属性 → 转换）
 ```
-CI 还会调用 `pick_features` MCP 工具并对 `feature_count > 0` 与 HTML 存在性做断言。
+CI 还会调用 `pick_features` MCP 工具并对 `feature_count > 0` 与特征 id 完整性做断言。
 
 ### pytest 回归套件
 ```bash
 venv/Scripts/python -m pytest tests/ -q    # Windows
 venv/bin/python        -m pytest tests/ -q    # macOS / Linux
 ```
-- `pytest.ini` 已配置覆盖率：`--cov=cad_core --cov=feature_locator --cov=feature_picker --cov=make_preview --cov=cad_mcp_server`。
+- `pytest.ini` 已配置覆盖率：`--cov=cad_core --cov=feature_locator --cov=feature_picker --cov=cad_mcp_server --cov=cad_assembly --cov=cad_service`。
 - 测试依赖 `pytest` / `pytest-cov` **不在**运行时 `requirements.txt` 中，需在 venv 里单独 `pip install pytest pytest-cov`。
 - CI 为 **3 平台矩阵**（ubuntu / macOS / windows，Python 3.13，环境变量 `PYTHONUTF8=1`），执行 bootstrap → 冒烟 → pytest。
 
@@ -389,16 +342,14 @@ venv/bin/python        -m pytest tests/ -q    # macOS / Linux
 - 其它大部分工具（convert / extract / pick 等）不 import build123d，不受此影响。
 
 ### Windows 中文文件名 / 路径编码（UnicodeEncodeError）
-- 代码已统一用 **utf-8** 读写（`open(..., encoding="utf-8")`），且 HTML 文件名/标题都做了
-  `html.escape` 转义；跨平台测试（含中文文件名）在 3 OS 上验证通过。
+- 代码已统一用 **utf-8** 读写（`open(..., encoding="utf-8")`）；跨平台测试（含中文文件名）
+  在 3 OS 上验证通过（上传通道 / 图纸 SVG 文本均按 utf-8 处理）。
 - 若 Windows 控制台打印中文报 `UnicodeEncodeError`，把终端设为 UTF-8，或设置环境变量
   `PYTHONUTF8=1`（CI 已默认设置）。**切勿**用 GBK 去解码中文路径/文件名——本仓库代码不使用 GBK。
 
 ## 打包 / 给其他 agent 用
-分发时把整个仓库（含 `vendor/`）一起带走即可；缺失 `vendor/` 时历史版本会尝试从 CDN 下载，
-但**当前版本要求 vendor 已随仓库提交**（运行时 SHA-256 校验，缺文件即报错，不会静默联网）。
-HTML 与同目录 `vendor/` 的相对位置不能拆开。
+分发时把整个仓库一起带走即可（`frontend/dist/` 随仓库提交，无需 Node；运行期全部离线）。
 
 ## 注意
-- `venv/`、`previews/`（生成产物）、`*.stl`、`*.html` 等已被 `.gitignore` 排除，不进版本库。
+- `venv/`、`workspace/`（生成产物）等已被 `.gitignore` 排除，不进版本库。
 - `build123d_model` 工具出于安全默认禁用（见上文「MCP Server 使用」）；`pick_features` 已接入，不再是缺口。

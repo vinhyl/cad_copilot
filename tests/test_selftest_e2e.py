@@ -1,19 +1,20 @@
-"""TE2 — full-pipeline end-to-end regression (read -> properties -> preview).
+"""TE2 — full-pipeline end-to-end regression (read -> properties -> convert).
 
-Exercises the whole non-interactive toolchain against the committed samples:
+Exercises the non-interactive toolchain against the committed samples:
   * read a STEP/IGES, compute properties (volume/area/topology)
   * convert between formats via write_shape
-  * generate a self-contained preview (make_preview -> STL + HTML)
+  * enumerate features via the picker library (collect_feature_solids)
 
 These are the same steps selftest.py performs, now pinned as pytest cases so a
-regression in read/properties/mesh/preview is caught automatically.
+regression in read/properties/convert is caught automatically.
+(The historical make_preview HTML/STL outlet was retired with the static
+previews; the Web frontend renders meshes from the glTF cache instead.)
 """
 from __future__ import annotations
 
 import os
 
 import cad_core
-import make_preview
 
 
 def test_read_and_properties(selftest_step):
@@ -24,18 +25,6 @@ def test_read_and_properties(selftest_step):
     assert p["topology"]["faces"] > 0
     assert p["topology"]["edges"] > 0
     assert "bounding_box" in p
-
-
-def test_e2e_preview_writes_html_and_stl(selftest_step, tmp_out):
-    res = make_preview.make_preview(selftest_step, out_dir=tmp_out)
-    assert os.path.exists(res["html"])
-    assert os.path.exists(res["stl"])
-    assert os.path.getsize(res["html"]) > 0
-    assert os.path.getsize(res["stl"]) > 0
-    # the HTML references the embedded base64 STL and escaped file name
-    html_text = open(res["html"], encoding="utf-8").read()
-    assert "__B64__" not in html_text          # placeholder must be replaced
-    assert "STLLoader" in html_text
 
 
 def test_e2e_iges_roundtrip_volume_preserved(selftest_iges, tmp_out):
@@ -57,21 +46,12 @@ def test_e2e_convert_step_to_stl(selftest_step, tmp_out):
     assert os.path.getsize(out) > 0
 
 
-def test_e2e_pick_features_full_chain(selftest_step, tmp_out):
-    """Bonus: the interactive picker also runs end-to-end on selftest.step.
-
-    Skipped (not failed) if the offline three.js vendor fails verification, so
-    a vendoring hiccup does not masquerade as a logic regression.
-    """
-    import pytest
+def test_e2e_pick_features_full_chain(selftest_step):
+    """The feature-enumeration library (same one the Web cache export uses)
+    runs end-to-end on selftest.step and reports ids for every feature."""
     import feature_picker
-    try:
-        res = feature_picker.make_picker(selftest_step, out_dir=tmp_out)
-    except RuntimeError as e:
-        if "vendor" in str(e).lower():
-            pytest.skip("offline three.js vendor verification unavailable")
-        raise
-    assert os.path.exists(res["html"])
-    assert res["feature_count"] >= 0
-    # every reported feature carries an id
-    assert all("id" in f for f in res["features"])
+    shape = cad_core.read_shape(selftest_step)
+    feats = feature_picker.collect_feature_solids(shape)
+    assert feats
+    # every reported feature carries an id and a solid
+    assert all("id" in f and "solid" in f for f in feats)

@@ -2,7 +2,7 @@
 
 Provides:
   * repository-root resolution + sys.path injection so the top-level modules
-    (cad_core, feature_locator, feature_picker, make_preview, cad_mcp_server)
+    (cad_core, feature_locator, feature_picker, cad_mcp_server)
     are importable from inside ``tests/``.
   * path fixtures pointing at the committed ``selftest*.step`` / ``.iges``
     sample files under the repository root.
