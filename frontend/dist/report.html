@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>CAD Copilot · 报告中心</title>
+    <script type="module" crossorigin src="/app/assets/report-BK4waVha.js"></script>
+    <link rel="modulepreload" crossorigin href="/app/assets/utils-BgfXieBA.js">
+    <link rel="stylesheet" crossorigin href="/app/assets/utils-DMZNZ1J2.css">
+  </head>
+  <body>
+    <div id="app" class="page-report">
+      <header class="sess-bar">
+        <button id="nav-home" class="sess-btn ghost" title="回首页">← 首页</button>
+        <div class="sess-title">
+          <b>报告中心</b>
+          <span id="report-meta" class="sess-meta">体检 · 统计 · 版本历史快照</span>
+        </div>
+        <div class="sess-spacer"></div>
+        <div id="report-status" class="sess-status">等待加载</div>
+        <button id="btn-generate" class="sess-btn primary" title="生成当前装配体的快照报告">生成报告</button>
+      </header>
+
+      <div class="report-main">
+        <aside class="report-list-col">
+          <div class="rail-head"><span class="rail-title">历史报告</span></div>
+          <div id="report-list" class="report-list">
+            <div class="placeholder">尚无报告：点击右上「生成报告」</div>
+          </div>
+        </aside>
+        <section class="report-detail-col" id="report-detail">
+          <div class="placeholder report-empty">选择左侧报告查看详情，或生成新报告</div>
+        </section>
+      </div>
+    </div>
+  </body>
+</html>

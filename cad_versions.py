@@ -134,7 +134,8 @@ class VersionStore:
     # ------------------------------------------------------------------
 
     def commit(self, changes: dict, changelog: str,
-               prepared_dir: str | None = None) -> dict:
+               prepared_dir: str | None = None,
+               moves: dict | None = None) -> dict:
         """Atomically commit a new version.
 
         Args:
@@ -143,10 +144,13 @@ class VersionStore:
             changelog: deterministic human-readable description.
             prepared_dir: directory holding the files; its contents are
                 moved into the new version dir (R6: prepare then rename).
+            moves: M6.5 实例级位移 {node_id: {"dx","dy","dz"}}（草稿 move
+                步骤落版本）。允许 moves-only 提交（changes 为空）；
+                语义为"该节点相对基线的总位移"，跨版本后写覆盖。
 
         Returns the new version record.
         """
-        if not changes:
+        if not changes and not moves:
             raise ValueError("empty changes")
         vid = self.next_version_id()
         target = os.path.join(self.root, vid)
@@ -181,10 +185,29 @@ class VersionStore:
             "changelog": changelog,
             "changes": {tid: f"{vid}/{tid}.step" for tid in changes},
         }
+        if moves:
+            record["moves"] = {nid: {"dx": float(d.get("dx", 0)),
+                                     "dy": float(d.get("dy", 0)),
+                                     "dz": float(d.get("dz", 0))}
+                               for nid, d in moves.items()}
         self._manifest["versions"].append(record)
         self._manifest["current"] = vid
         self._save_manifest()
         return record
+
+    def resolve_moves(self, version: str | None = None) -> dict:
+        """{node_id: (dx, dy, dz)} —— 版本链上 ≤ version 的全部 moves，
+        后写覆盖（与 resolve_step 的"最新者胜"语义一致）。"""
+        vid = version or self.current
+        order = self._version_order()
+        if vid not in order:
+            raise KeyError(f"no such version: {vid}")
+        out: dict[str, tuple] = {}
+        for v in self._manifest["versions"]:
+            if order[v["id"]] <= order[vid]:
+                for nid, m in (v.get("moves") or {}).items():
+                    out[nid] = (m.get("dx", 0), m.get("dy", 0), m.get("dz", 0))
+        return out
 
     def checkout(self, vid: str) -> dict:
         """Move the current pointer to an existing version (rollback)."""

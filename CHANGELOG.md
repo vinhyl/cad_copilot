@@ -5,6 +5,176 @@
 
 ## [未发布]
 
+### 修复 (Fixed)（编辑页特征选取/高亮链路 + 侧栏折叠 + 模板名乱码）
+- **模板名/零件名 GBK 乱码**：SolidWorks 导出 STEP 时把中文名按 Windows
+  代码页（GBK）裸写进文件，STEP 标准不声明编码；OCCT 读取器默认按 UTF-8
+  解码（`Resource_FormatType_UTF8` → `TCollection_ExtendedString(bytes,
+  true)`），两套编码错位产生乱码（如 `¶à³Ýµ÷µµ×ùC4-1-1`）。逆向破解
+  OCCT 解码器（`NCollection_UtfIterator::readUTF8`，旧版 6 字节 UTF-8：
+  `k = UTF8_BYTES_MINUS_ONE[b0]` 逐字节 `<<6` 累加后减 `offsetsFromUTF8[k]`；
+  任一符号码点 > 0x10FFFF → `ConvertToUnicode` 返回 false → **整串回退
+  逐字节 Latin-1**——这正是"部分名字全乱、部分半乱"的原因）。另复刻 STEP
+  读取器 `cleanText` 链路（字符串字面量含首尾撇号整体解码，跳过开头撇号
+  并裁掉末字符，故末尾多字节序列吞掉撇号时真实名字末字符被裁，如"平头
+  刺针"末字节 EB）。新增 `build_mojibake_fixmap`：扫描源 STEP 全部引号
+  字符串，GBK 可解码者正向算出 OCCT 乱码串，建 乱码→正确名 映射表，
+  `parse_assembly` 在模板/树节点名读取后直接替换（36/36 全部命中，
+  根节点"总装260129"）。对任意 GBK STEP 有效，不依赖上游导出设置。
+  `SCHEMA_VERSION` 3 → 4，旧缓存下次 parse 自动重建。
+- **特征列表选取无 3D 高亮**：编辑页原先未调用 `showFeature`（首页特征
+  面板逻辑未复用），列表选特征只有表单切换无视觉反馈。新增
+  `syncFeatureHighlight`：特征选择 / 粒度切换 / 模板切换时在基线+草稿
+  双视口同步显示橙色 overlay；切走特征粒度或换模板自动清除。
+- **点击模型不联动目标特征列表**：特征级 3D 拾取 `pickFeatureAt` 三处
+  根因——① GLTFLoader 经 `PropertyBinding.sanitizeNodeName` 删除
+  `.` `:` `/` `[` `]`（`#1.1` → `#11`），与特征 JSON id 失配 → 加载时
+  按特征 JSON 建立 sanitize 名 → 原始 id 映射表；② 多 primitive 特征
+  被展开为 Group(原名) + Mesh(原名_N)，非递归射线检测永远打不中 → 改
+  递归检测并沿父链回溯顶层特征节点；③ 3D 拾取（等 glTF）与特征列表
+  （等 JSON）并行竞态 → `pendingFeature` 暂存拾取结果，列表就绪后回放
+  （模板已切换则丢弃）。首页特征面板共享 `showFeature` 同步受益。
+- **零件整体橙色染色淹没特征高亮**：`reapplyViewFilter` 原先将目标
+  模板全部实例染成橙色，与特征 overlay 高亮冲突。去掉整件染色，零件
+  保持默认色——编辑页的选中反馈只有特征 overlay 的橙色高亮一层。
+- **侧栏折叠丢失模型窗口且无法回退**：折叠时 `grid-template-columns:
+  0 1fr 0` 把中栏压进 0 宽轨道（canvas 宽度变 1px）；改单列
+  `minmax(0,1fr)` 让中栏占满整行，中栏加常驻展开按钮杜绝"折叠后无法
+  恢复"死局；窄屏媒体查询重置为单列布局不受折叠影响。
+- **特征高亮呈条状空白/碎片状橙色**：零件模板 glTF 按自适应偏差
+  （`maxdim/800`，上限 0.5）网格化，特征 glTF 却固定偏差 0.1——特征
+  compound 复用原 shape 的同一批面（共享 TShape），不同偏差使 BRepMesh
+  对同一张曲面生成两套三角化，overlay 表面在零件表面前后交替摆动，
+  深度测试下呈条状空白，掠射角处偏差放大、碎片化最严重。修复：
+  `_export_features_gltf` 增加 `deflection` 参数并与模板导出统一用
+  `_deflection_for(shape)`（`_build_template_features` /
+  `refresh_template_features` 两条调用链同步传入）——同偏差下增量网格器
+  直接复用面上已存三角化，两份 glTF 顶点逐位一致（t1 实测 87 网格 /
+  1154 顶点全部精确重合），overlay 与零件表面严格共面；前端 overlay
+  材质恢复 `depthTest: true` + `polygonOffset(-1, -2)` 平局裁决。
+  `SCHEMA_VERSION` 2 → 3，旧缓存下次 parse 自动重建（咖啡机 62 模板
+  已重建验证：正对特征像素扫描实心填充，最长连续段 30、碎片段仅 2）。
+- **已知残留（暂缓优化）**：个别部位仍有轻微空白（不影响使用，用户
+  确认暂不处理）。候选优化方向：overlay 顶点沿法线微偏移（vertex
+  normal offset）替代纯 `polygonOffset`，或按掠射角自适应加大偏移量；
+  待用户反馈再定优先级。
+
+### 新增 (Added)（可观测性 + 干涉分级性能）
+- **结构化服务日志**：`workspace/logs/service.log`（2 MB × 3 轮转）——请求级
+  访问日志（方法/路径/状态/耗时，>1s 标 `SLOW`）；未捕获异常 500 兜底 + 完整
+  堆栈入日志（此前端点崩溃直接断连接，前端只见 network error）；parse/edit/
+  preview/confirm/report 关键路径失败 `log.exception` 记堆栈。
+- **前端错误捕获 `initErrorTrap`**：`error` + `unhandledrejection` 统一上报
+  `POST /api/logs/client`（含堆栈，3s 节流防刷屏），四页全接入；
+  `window.__cadErrors` 供控制台排查。
+- **几何重活线程池下放**：parse/edit/preview/confirm/report/drawing 等 7 个
+  端点的 OCP 重活经 `run_in_threadpool` 执行（`_GEOMETRY_LOCK` 仍保证 OCCT
+  串行，D2/R4 不变）——事件循环不再阻塞，修复"一次操作期间整服务冻结
+  （静态文件/health/WS 全部无响应）即系统瘫痪"的根因。
+- **干涉检查分级（交互性能）**：preview 默认 `level=bbox` AABB 粗筛（bbox
+  重叠即黄色"可能碰撞"卡片，毫秒级）；验证轨道新增「精确检查」按钮显式
+  布尔精检（红色卡片带穿透体积 mm³，hint 显示耗时秒数）；**confirm 守门
+  始终 exact 布尔**（D8 确定性不降级）。move 级微调 preview 热路径
+  13s → **~5ms**（62 模板咖啡机实测）。
+- **模板形状进程级缓存**：STEP 导入按 (path, mtime, size) 缓存（62 模板
+  冷 7.4s → 热 0s；版本 commit 覆盖由 mtime 失效，FIFO 256 淘汰）+ 本地
+  bbox 缓存（BRepBndLib 每不同 shape 只跑一次；世界 bbox = 8 角点 ×
+  实例矩阵纯 Python 数学，替代每实例 OCP 调用 ~5s）。
+- **`GET /api/assembly/view?cache_key=`**：cacheKey 直载通道（不读源文件、
+  不重 parse）——编辑页回首页、最近列表点击、URL 引导全部切换；源文件已
+  移动/删除或不在白名单时已缓存装配体仍可完整预览。`?cacheKey=` 与
+  `?load=` 互斥写回地址栏。
+- **preview 计时提示**：验证轨道显示「检查中… Ns」动态秒数（大装配精检
+  数十秒，静态文案会被当成假死）。
+
+### 修复 (Fixed)（性能加固过程中发现的正确性缺陷）
+- **`world_bbox` 平移分量丢失**：世界包围盒角点误用 `gp_Vec.Transformed`
+  （向量变换不含平移——数学正确但类型用错），所有实例的世界 bbox 全部
+  坍缩在模板本地位置，bbox 预筛长期失真（方向是"过度送检"，无漏检但
+  exact 白跑大量布尔对）。改纯 Python 点变换后动态正确（移动 5mm → 19
+  对重叠 / 远离 2000mm → 0 对）。
+- **move 步骤坏 node_id 静默退化全量检查**：未知 node_id（如误用 STEP
+  标签 `NAUO66` 而非节点 id `n2`）时 `apply_moves` 静默跳过 → 增量候选集
+  为空 → `check_interference` 退化全量 O(n²) 布尔（62 模板 ~5 分钟）且
+  草稿实际没移动任何东西（错误结果 + 假死双重症状）。现在未知/非零件
+  节点 400 快速失败（中文提示区分节点 id 与 STEP 名）。
+- **空步骤 preview 触发全量检查**：删光步骤的 preview 之前同样会跑全量
+  干涉检查（~5 分钟），现在短路 3ms 返回（草稿=基线）。
+- **report_generate `counts` NameError**：报告中心重构引入的回归，日志
+  系统上线后当场捕获修复（instances 计数）。
+- **零步骤放弃草稿误载整装配体**：仅在草稿视口展示过编辑几何时才重载
+  基线几何，且保留相机与范围过滤状态。
+- **草稿删除 WS 回声误提示**：删除请求带 `client` 标识，广播事件透传，
+  前端忽略自己发起的删除事件（不再弹"草稿已被远程删除"）。
+- **编辑页回首页/重新打开失败**：回首页与最近列表原先拿 `manifest.
+  source_file`（裸文件名）走 parse——parse 必须读源文件算 hash，源文件
+  移动/删除或不在白名单时直接失败（首页空白）。改 `GET /api/assembly/
+  view` 按 cacheKey 直载后闭环。
+
+### 新增 (Added)（M6.5：编辑页观察工具 + 草稿内位置调整）
+- **双视口相机联动**：基线/草稿两视口视角实时同步（OrbitControls change
+  回调互播 + 回声守卫防死循环），「视角同步」按钮锁/解锁，开启即对齐。
+- **观察工具条**：爆炸滑杆 / 三轴剖切（X/Y/Z + 位置 + 反向，`setSection`
+  向后兼容旧签名）/ 透明鬼影 / 视角书签（1–3 槽）/ 视角同步 / 移动模式
+  ——两视口同步生效。
+- **范围切换自动取景**：预览范围（整装配/子装配/零件）切换时相机自动
+  取景到目标包围盒（`fitToIds`，含爆炸与临时位移；工具条高度变化导致
+  的画布裁剪错位以动态位置计算修复）。
+- **草稿内位置调整（move 步骤）**：移动模式下草稿视口点选零件 →
+  TransformControls 拖拽 → 生成 move 步骤（实例级世界系位移，node_id
+  寻址）；同节点重复拖拽替换不累积（"最终位置"语义）；与几何步骤统一
+  进草稿步骤表、参与增量干涉检查（移动实例加入候选集）、参与版本落盘
+  （commit `moves` 字段 + `resolve_moves` 沿版本链解析，move-only 版本
+  不携带模板文件）；基线视口永远不动（对比语义）。
+
+### 新增 (Added)（M6：Agent 通信层——用户↔agent 基于选中上下文协作）
+- **选中上行 `POST/GET /api/selection`**：前端把用户点选的零件/特征上报
+  服务（含 page 与 tab 标识，支持多窗口并发）；agent 经 MCP
+  `get_user_selection` 读取——"这个的厚度加 1mm"式对话的上下文来源。
+- **会话发现 `GET /api/sessions`**：服务端最近会话列表，替代 localStorage
+  最近文件（跨浏览器同步；`workspace/selection/` 会话状态落盘）。
+- **WS 事件广播**：draft_saved / draft_deleted / version_changed /
+  selection_changed / report_added——agent 内置浏览器与系统浏览器双开时
+  状态互通。
+- **MCP 会话工具组 7 个**（总数 11 → 18）：`list_sessions` /
+  `get_user_selection` / `read_draft` / `preview_draft` / `edit_draft` /
+  `checkout_version` / `generate_report`。
+- **协作边界固化**：agent 只写草稿（`edit_draft`），确认落版本
+  （`/api/drafts/confirm`）永远留给用户在 Web UI 点按钮。
+- **token 与 URL 引导加固**：`?token=` / `?load=` 保留在地址栏（agent
+  内置浏览器"用系统浏览器打开"后免重新输入，裸 prompt 改页内引导卡片）；
+  401 统一清 token 并提示从 agent 重新打开链接；加载成功后 `?load=`
+  写回地址栏供复制/刷新。
+
+### 新增 (Added)（M4/M5：报告中心 + FEA 基线草稿双跑对比）
+- **报告中心**：`POST /api/reports/generate`（快照聚合：体检结果 + 统计
+  （模板/实例数、体积、表面积）+ 版本历史）/ `GET /api/reports`（列表）/
+  `GET /api/reports/get`（单份）；`workspace/reports/<key>/` 落盘；独立
+  报告页（report.html）浏览。
+- **FEA 双跑对比**：`POST /api/drafts/fea-compare`——对基线与草稿版本的
+  目标模板分别跑静力学，对比最大位移 / 最大 von Mises 应力；编辑页右栏
+  提交、R5 job 进度跟踪、结果对比展示；步骤变更后已有结果标记过期。
+
+### 新增 (Added)（M1–M3：编辑会话闭环——多页架构 + 草稿模式 + 试改工作流）
+- **Vite 多入口 MPA**：前端从单页拆为四页——首页（index.html：预览 /
+  选取 / 上下文动作区）、编辑会话（edit.html）、图纸对照（drawing.html）、
+  报告（report.html）；页面间经 URL 参数传递 cacheKey/scope；代码分层
+  `pages/`（页逻辑）+ `shared/`（utils/jobs/plugins/api/scene/tree）；
+  dev server 代理全部后端静态路由（/cache /versions /drawings /drafts
+  /fea /render）。
+- **草稿模式端点**：`GET /api/drafts`（单槽位读取）/ `POST /api/drafts/
+  save` / `DELETE /api/drafts`（放弃）/ `POST /api/drafts/preview`
+  （步骤重放 → 草稿 manifest + 增量干涉 + diff）/ `POST /api/drafts/
+  confirm`（全部步骤原子落为一个版本）；`GET /drafts/{key}/...` 草稿
+  预览 glTF 静态服务（防穿越）。
+- **编辑会话页（edit.html）**：进入即锁基线版本；双视口（基线锁定 vs
+  草稿实时）；左栏声明式步骤表（多目标、可增删，每步变更自动触发重放 +
+  增量干涉，防抖 + 竞态守卫）；右栏验证轨道；预览范围三档 visibility
+  lens（整装配/子装配/零件，不换页）+ 目标模板高亮；五级级联操作表单
+  （目标模板 → 编辑粒度 → 特征 → 操作 → 参数，特征选项按类型过滤自
+  `features/tN.json`）；窄屏底部抽屉 + 侧栏折叠（响应式）。
+- **首页上下文动作区**：按选中层级（装配体/子装配体/零件）动态切换可用
+  操作（隔离子树 / 进入编辑 / 特征面板 / 体检 / 力学 / 渲染 / 图纸）。
+
 ### 移除 (Removed)（静态预览出口清理）
 - **退役三个"生成静态 HTML 预览"的 CLI 出口**：`make_preview.py`（整体预览页）、
   `feature_locator.py` 的 2D 定位图出口、`feature_picker.py` 的离线拾取页出口。

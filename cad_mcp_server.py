@@ -15,6 +15,17 @@ Tools:
   - build123d_model    : run a build123d modeling script (DISABLED by default;
                          requires CAD_MCP_ALLOW_BUILD123D=1 -- local code execution)
 
+  Session-aware tools (M6) -- talk to the local cad_service HTTP API so the
+  agent shares sessions/drafts/gates with the Web frontend (needs
+  CAD_SERVICE_URL + CAD_SERVICE_TOKEN):
+  - list_sessions      : active sessions (cache_key discovery)
+  - get_user_selection : what the user clicked in the browser ("这个")
+  - read_draft         : current draft step table of a session
+  - preview_draft      : dry-run steps + interference check + diff
+  - edit_draft         : write the DRAFT (never commits -- user confirms)
+  - checkout_version   : move a session's current pointer
+  - generate_report    : snapshot report (audit + stats + version history)
+
 Run:  python cad_mcp_server.py   (stdio transport, consumed by WorkBuddy mcp.json)
 """
 from __future__ import annotations
@@ -372,6 +383,204 @@ def audit_assembly(input_path: str, out_dir: str = "") -> str:
         return json.dumps(report, ensure_ascii=False, indent=2)
     report = cad_assembly.audit_assembly(cache_dir, manifest)
     return json.dumps(report, ensure_ascii=False, indent=2)
+
+
+# ---------------------------------------------------------------------------
+# M6: session-aware tools -- the agent communication loop.
+#
+# These tools talk to the LOCAL cad_service HTTP API (127.0.0.1) instead of
+# doing geometry in-process, so every write goes through the same gates
+# (interference guard, version chain, atomic commit) as the Web frontend,
+# and every change is broadcast to open browser tabs via /ws.
+#
+# Required env (the agent that starts cad_service should export the same
+# values to the MCP server process):
+#   CAD_SERVICE_URL    e.g. http://127.0.0.1:8764   (default shown)
+#   CAD_SERVICE_TOKEN  the SAME bearer token cad_service was started with
+# ---------------------------------------------------------------------------
+def _service_url(path: str, params: dict | None = None) -> str:
+    import urllib.parse
+    base = os.environ.get("CAD_SERVICE_URL", "http://127.0.0.1:8764")
+    url = base.rstrip("/") + path
+    if params:
+        url += "?" + urllib.parse.urlencode(params)
+    return url
+
+
+def _service_call(method: str, path: str, body: dict | None = None,
+                  params: dict | None = None, timeout: float = 60.0) -> dict:
+    """Call the local cad_service API (stdlib urllib only, no new deps)."""
+    import urllib.request
+    import urllib.error
+    tok = os.environ.get("CAD_SERVICE_TOKEN", "")
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(_service_url(path, params),
+                                 data=data, method=method)
+    if tok:
+        req.add_header("Authorization", f"Bearer {tok}")
+    if data is not None:
+        req.add_header("Content-Type", "application/json")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read() or b"{}")
+    except urllib.error.HTTPError as e:
+        detail = ""
+        try:
+            detail = e.read().decode(errors="replace")[:300]
+        except Exception:  # noqa: BLE001
+            pass
+        raise ValueError(f"cad_service HTTP {e.code} on {method} {path}: "
+                         f"{detail or e.reason}") from None
+
+
+def _parse_steps(steps: str) -> list:
+    """steps 参数为 JSON 字符串（声明式步骤表），解析并轻量校验。"""
+    try:
+        arr = json.loads(steps)
+    except json.JSONDecodeError as e:
+        raise ValueError(f"steps is not valid JSON: {e}") from None
+    if not isinstance(arr, list):
+        raise ValueError("steps must be a JSON array of step objects")
+    return arr
+
+
+@mcp.tool()
+def list_sessions() -> str:
+    """List the active CAD sessions (M6): every assembly opened in the
+    Web frontend, with its cache_key, source file, current version and
+    draft step count. Use this first when the user says something like
+    "打开的那个装配体" without naming a file, or to discover which
+    cache_key to pass to the other session tools.
+
+    Returns: JSON {sessions: [{cache_key, source_file, current_version,
+    template_count, draft_steps, updated}]} sorted newest-first.
+    """
+    return json.dumps(_service_call("GET", "/api/sessions"),
+                      ensure_ascii=False, indent=2)
+
+
+@mcp.tool()
+def get_user_selection(cache_key: str = "") -> str:
+    """Read what the user has selected in the browser viewport (M6).
+
+    The Web frontend uploads every part/feature click. Call this to resolve
+    deictic references in the user's message ("这个零件", "选中的孔") into
+    concrete ids: node_id / template_id / feature_id, enriched with the
+    node name, template name and full feature metadata (type, axis, radii,
+    label). The SAME feature ids (#N / #N.k / P#) drive the viewport's
+    interactive picking, so "enlarge #3" targets exactly what the user
+    clicked.
+
+    Args:
+        cache_key: optional session filter. Empty = the most recent
+                   selection across ALL sessions (the usual "这个").
+    Returns: JSON selection record, or {empty: true} when nothing was
+    ever selected.
+    """
+    params = {"cache_key": cache_key} if cache_key else None
+    return json.dumps(_service_call("GET", "/api/selection", params=params),
+                      ensure_ascii=False, indent=2)
+
+
+@mcp.tool()
+def read_draft(cache_key: str) -> str:
+    """Read the current draft step table of a session (M6).
+
+    Args:
+        cache_key: session id (from list_sessions)
+    Returns: JSON {empty: true} or the full draft
+    {baseline_version, baseline_source_file, steps[], updated}.
+    """
+    return json.dumps(
+        _service_call("GET", "/api/drafts",
+                      params={"cache_key": cache_key}),
+        ensure_ascii=False, indent=2)
+
+
+@mcp.tool()
+def preview_draft(cache_key: str, steps: str) -> str:
+    """Dry-run a draft step table (M6): replay the steps server-side and
+    return the incremental interference check + volume/area diff summary,
+    WITHOUT saving anything. Use this to validate generated steps before
+    edit_draft -- a draft that introduces interferences is reported here
+    (HTTP 409 payload surfaced as interference hits).
+
+    Args:
+        cache_key: session id
+        steps: JSON array of declarative steps, each
+               {template_id, operation, params, feature_id?}. Operations:
+               template-level drill/fillet/chamfer/scale; feature-level
+               hole_resize etc. (ids from pick_features / the selection)
+    Returns: JSON {interferences, edited_templates, diff} (the full draft
+    manifest is trimmed away -- call read_draft/pick_features for details).
+    """
+    body = {"cache_key": cache_key, "steps": _parse_steps(steps)}
+    res = _service_call("POST", "/api/drafts/preview", body=body,
+                        timeout=120.0)
+    res.pop("manifest", None)   # trim: agent never needs the whole tree
+    return json.dumps(res, ensure_ascii=False, indent=2)
+
+
+@mcp.tool()
+def edit_draft(cache_key: str, steps: str, baseline_version: str = "") -> str:
+    """Write the draft step table of a session (M6). This is the agent's
+    ONLY write path -- it saves a DRAFT, never commits a version. The user
+    reviews the live-updated draft in the browser and clicks 确认保存
+    themselves; the interference gate re-runs in full at confirm time.
+
+    The browser tab (if open) refreshes automatically via /ws push.
+
+    Args:
+        cache_key: session id
+        steps: JSON array of declarative steps (see preview_draft)
+        baseline_version: optional lock; empty = the session's current
+                          version is fetched and used automatically
+    Returns: JSON {ok, cache_key, step_count}.
+    """
+    if not baseline_version:
+        vers = _service_call("GET", "/api/versions",
+                             params={"cache_key": cache_key})
+        baseline_version = vers.get("current", "v0")
+    body = {"cache_key": cache_key,
+            "baseline_version": baseline_version,
+            "steps": _parse_steps(steps),
+            "client": "mcp-agent"}
+    return json.dumps(_service_call("POST", "/api/drafts/save", body=body),
+                      ensure_ascii=False, indent=2)
+
+
+@mcp.tool()
+def checkout_version(cache_key: str, version: str) -> str:
+    """Roll a session's current pointer back to an earlier version (M6).
+    Version files are never rewritten (append-only chain); this only moves
+    the "current" pointer. Open browser tabs get a version_changed push.
+
+    Args:
+        cache_key: session id
+        version: e.g. "v0" (baseline) or "v2"
+    Returns: JSON {ok, current}.
+    """
+    body = {"cache_key": cache_key, "version": version}
+    res = _service_call("POST", "/api/versions/checkout", body=body)
+    res.pop("manifest", None)   # trim
+    return json.dumps(res, ensure_ascii=False, indent=2)
+
+
+@mcp.tool()
+def generate_report(cache_key: str) -> str:
+    """Generate an immutable snapshot report for a session (M6): health
+    audit (interference + DFM), assembly stats (volume/area, instance-
+    weighted) and the full version history. Reports live in the Report
+    Center page; the open tab refreshes its list via /ws push.
+
+    Args:
+        cache_key: session id
+    Returns: JSON report {report_id, summary, assembly_stats,
+    interferences, dfm, versions[]}.
+    """
+    res = _service_call("POST", "/api/reports/generate",
+                        body={"cache_key": cache_key}, timeout=120.0)
+    return json.dumps(res, ensure_ascii=False, indent=2)
 
 
 if __name__ == "__main__":

@@ -3,84 +3,41 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>CAD Copilot</title>
-    <script type="module" crossorigin src="/app/assets/index-CVvUR4i_.js"></script>
-    <link rel="stylesheet" crossorigin href="/app/assets/index-QNF85JRm.css">
+    <title>CAD Copilot · 首页</title>
+    <script type="module" crossorigin src="/app/assets/index-CZTkUlKb.js"></script>
+    <link rel="modulepreload" crossorigin href="/app/assets/utils-BgfXieBA.js">
+    <link rel="modulepreload" crossorigin href="/app/assets/tree-5a9XzaHv.js">
+    <link rel="stylesheet" crossorigin href="/app/assets/utils-DMZNZ1J2.css">
   </head>
   <body>
-    <div id="app">
-      <aside id="sidebar">
-        <h1>CAD Copilot</h1>
-        <div id="load-form">
-          <button type="button" id="btn-browse" title="从本机任意位置选择文件（STEP / DXF / DWG），也可直接拖入窗口">打开文件…</button>
-          <label class="force-row" title="忽略缓存键，强制重新解析并重建缓存">
-            <input type="checkbox" id="force" /> 强制重建缓存
-          </label>
-          <input type="file" id="file-input" accept=".step,.stp,.dxf,.dwg" hidden />
-        </div>
-        <div id="status" class="idle">浏览或拖入文件加载（STEP / DXF / DWG）</div>
-        <div id="recent-panel" class="hidden">
-          <div class="fp-head">
-            <span>最近使用</span>
-            <button id="recent-clear" title="清空记录">×</button>
-          </div>
-          <div id="recent-list"></div>
-        </div>
-        <div id="tree"></div>
-        <div id="edit-panel" class="hidden">
-          <div class="fp-head">
-            <span id="ep-title">编辑</span>
-            <button id="ep-close" title="关闭">×</button>
-          </div>
-          <div class="ep-body">
-            <div class="ep-row">
-              <label>操作</label>
-              <select id="ep-op">
-                <option value="drill">钻孔</option>
-                <option value="chamfer">倒角</option>
-                <option value="fillet">圆角</option>
-                <option value="scale">缩放</option>
-              </select>
-            </div>
-            <div class="ep-row" id="ep-drill-params">
-              <label>位置 x,y,z</label>
-              <input id="ep-pos" value="0,0,0" />
-              <label>半径 R</label>
-              <input id="ep-radius" type="number" value="1" min="0.01" step="0.1" />
-              <label>深度</label>
-              <input id="ep-depth" type="number" value="4" min="0.01" step="0.5" />
-            </div>
-            <div class="ep-row hidden" id="ep-chamfer-params">
-              <label>距离</label>
-              <input id="ep-distance" type="number" value="0.2" min="0.01" step="0.1" />
-            </div>
-            <div class="ep-row hidden" id="ep-fillet-params">
-              <label>半径</label>
-              <input id="ep-fradius" type="number" value="0.2" min="0.01" step="0.1" />
-            </div>
-            <div class="ep-row hidden" id="ep-scale-params">
-              <label>系数</label>
-              <input id="ep-factor" type="number" value="1.5" min="0.01" step="0.1" />
-            </div>
-            <button id="ep-run">执行修改（干涉守门）</button>
-            <div id="ep-msg" class="hidden"></div>
+    <div id="app" class="page-home">
+      <aside id="sidebar" class="sidebar-left">
+        <div class="sb-head">
+          <h1>CAD Copilot</h1>
+          <div class="sb-tabs">
+            <button class="sb-tab active" data-tab="tree">装配</button>
+            <button class="sb-tab" data-tab="plugins">插件</button>
           </div>
         </div>
-        <div id="version-panel" class="hidden">
-          <div class="fp-head">
-            <span>版本历史</span>
-            <button id="vp-refresh" title="刷新">↻</button>
+        <div class="sb-tab-body" data-body="tree">
+          <div id="load-form">
+            <button type="button" id="btn-browse" title="从本机任意位置选择文件（STEP / DXF / DWG），也可直接拖入窗口">打开文件…</button>
+            <label class="force-row" title="忽略缓存键，强制重新解析并重建缓存">
+              <input type="checkbox" id="force" /> 强制重建缓存
+            </label>
+            <input type="file" id="file-input" accept=".step,.stp,.dxf,.dwg" hidden />
           </div>
-          <div id="vp-list"></div>
-        </div>
-        <div id="feature-panel" class="hidden">
-          <div class="fp-head">
-            <span id="fp-title">特征</span>
-            <button id="fp-close" title="关闭">×</button>
+          <div id="status" class="idle">浏览或拖入文件加载（STEP / DXF / DWG）</div>
+          <div id="recent-panel" class="hidden">
+            <div class="fp-head">
+              <span>最近使用</span>
+              <button id="recent-clear" title="清空记录">×</button>
+            </div>
+            <div id="recent-list"></div>
           </div>
-          <div id="fp-list"></div>
+          <div id="tree"></div>
         </div>
-        <div id="plugin-panel">
+        <div class="sb-tab-body hidden" data-body="plugins">
           <div class="fp-head">
             <span>插件状态</span>
             <button id="plug-refresh" title="重新探测">↻</button>
@@ -88,6 +45,7 @@
           <div id="plugin-list"></div>
         </div>
       </aside>
+
       <main id="viewport">
         <div id="toolbar">
           <div class="tb-group" title="多层级爆炸：拖动改变爆炸比例">
@@ -106,18 +64,56 @@
             <input type="range" id="section-slider" min="0" max="100" value="100" />
           </div>
           <div class="tb-group">
-            <button id="btn-audit" title="一键体检：干涉 + DFM 可制造性检查">体检</button>
-            <button id="btn-drawing" title="导入 DXF/DWG 图纸对照（D5）">图纸</button>
-            <button id="btn-fea" title="对选中零件做 CalculiX 静力学分析（D7 插件，R5 任务化）">力学</button>
-            <button id="btn-render" title="Blender 离线渲染当前装配体（D7 插件，R5 任务化）">渲染</button>
             <button id="btn-cam-save" title="保存当前视角">存视角</button>
             <button id="btn-cam-restore" title="恢复已存视角">回视角</button>
             <button id="btn-view-reset" title="复位视图（爆炸/显隐/临时移动/相机）">复位视图</button>
           </div>
         </div>
+        <div id="ctx-bar" class="ctx-bar">
+          <div id="ctx-actions" class="ctx-actions"></div>
+          <div class="entry-cards">
+            <button class="entry-card" id="entry-edit" title="进入编辑会话（草稿 + 验证轨道 + 分屏对比）">
+              <div class="entry-icon">✎</div>
+              <div><b>编辑会话</b><br><span>草稿 · 分屏对比 · 干涉</span></div>
+            </button>
+            <button class="entry-card" id="entry-drawing" title="打开图纸对照独立页">
+              <div class="entry-icon">▣</div>
+              <div><b>图纸对照</b><br><span>DXF / DWG 语义 + SVG</span></div>
+            </button>
+            <button class="entry-card" id="entry-report" title="体检报告中心（干涉 + DFM）">
+              <div class="entry-icon">✓</div>
+              <div><b>体检·分析</b><br><span>干涉 · DFM · 报告回链</span></div>
+            </button>
+          </div>
+        </div>
+        <div id="info-summary" class="info-summary"></div>
       </main>
-      <div id="audit-modal" class="hidden">
-        <div id="audit-card">
+
+      <!-- 浏览态：版本历史（临时 modal，报告中心再统一） -->
+      <div id="versions-modal" class="hidden modal">
+        <div class="card">
+          <div class="fp-head">
+            <span>版本历史</span>
+            <button id="versions-close" title="关闭">×</button>
+          </div>
+          <div id="versions-body" style="padding:10px 12px"></div>
+        </div>
+      </div>
+
+      <!-- 浏览态：特征查看（临时 modal，编辑会话再落地） -->
+      <div id="feature-modal" class="hidden modal">
+        <div class="card">
+          <div class="fp-head">
+            <span id="feature-title">特征</span>
+            <button id="feature-close" title="关闭">×</button>
+          </div>
+          <div id="feature-body"></div>
+        </div>
+      </div>
+
+      <!-- 浏览态：体检报告（临时 modal，报告中心再落地） -->
+      <div id="audit-modal" class="hidden modal">
+        <div class="card">
           <div class="fp-head">
             <span>体检报告</span>
             <button id="audit-close" title="关闭">×</button>
@@ -125,36 +121,20 @@
           <div id="audit-body"></div>
         </div>
       </div>
-      <div id="drawing-modal" class="hidden">
-        <div id="drawing-card">
-          <div class="fp-head">
-            <span>图纸对照</span>
-            <button id="drawing-close" title="关闭">×</button>
-          </div>
-          <div id="drawing-body">
-            <div id="drawing-form">
-              <button id="drawing-browse" title="选择 DXF / DWG 文件">浏览文件…</button>
-              <span id="drawing-msg">或将文件拖入主窗口</span>
-            </div>
-            <div id="drawing-split">
-              <div id="drawing-view"></div>
-              <div id="drawing-semantics"></div>
-            </div>
-          </div>
-        </div>
-      </div>
-      <div id="render-modal" class="hidden">
-        <div id="render-card">
+
+      <!-- 浏览态：渲染结果 -->
+      <div id="render-modal" class="hidden modal">
+        <div class="card wide">
           <div class="fp-head">
             <span>离线渲染</span>
             <button id="render-close" title="关闭">×</button>
           </div>
-          <div id="render-body">
-            <div id="render-view"></div>
-            <div id="render-meta"></div>
-          </div>
+          <div id="render-view"></div>
+          <div id="render-meta"></div>
         </div>
       </div>
+
+      <!-- 任务卡片（跨页共享） -->
       <div id="job-card" class="hidden">
         <div class="fp-head">
           <span id="job-title">任务</span>
@@ -168,8 +148,10 @@
         </div>
       </div>
     </div>
+
     <div id="drop-overlay" class="hidden">
       <div class="drop-msg">松开以加载文件（STEP / DXF / DWG）</div>
     </div>
+
   </body>
 </html>

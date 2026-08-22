@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>CAD Copilot · 编辑会话</title>
+    <script type="module" crossorigin src="/app/assets/edit-yZPi_A0H.js"></script>
+    <link rel="modulepreload" crossorigin href="/app/assets/utils-BgfXieBA.js">
+    <link rel="modulepreload" crossorigin href="/app/assets/tree-5a9XzaHv.js">
+    <link rel="stylesheet" crossorigin href="/app/assets/utils-DMZNZ1J2.css">
+  </head>
+  <body>
+    <div id="app" class="page-edit">
+      <header id="sess-bar" class="sess-bar">
+        <button id="nav-home" class="sess-btn ghost" title="回首页">← 首页</button>
+        <div class="sess-title">
+          <b>编辑会话</b>
+          <span id="sess-meta" class="sess-meta">等待加载基线…</span>
+        </div>
+        <div class="sess-spacer"></div>
+        <div id="sess-status" class="sess-status">就绪</div>
+        <button id="sess-abandon" class="sess-btn danger" title="放弃草稿 · 步骤清空">放弃</button>
+        <button id="sess-save" class="sess-btn" title="手动保存草稿（单槽位）">保存草稿</button>
+        <button id="sess-confirm" class="sess-btn primary" title="确认：全部草稿步骤落为一个版本">确认保存</button>
+      </header>
+
+      <div id="edit-ws" class="edit-ws layout-split-h">
+        <aside class="rail rail-left">
+          <div class="rail-head">
+            <span class="rail-title">草稿步骤</span>
+            <button id="rail-toggle" title="收起/展开侧栏">›</button>
+          </div>
+          <div class="rail-body steps">
+            <div class="rail-hint">声明式步骤表：多目标 · 可增删。每步变更触发草稿重放 + 增量干涉检查。</div>
+            <div id="steps-list" class="steps-list"></div>
+            <div id="step-form" class="step-form">
+              <div class="sf-title">添加编辑步骤</div>
+              <div class="sf-row">
+                <label for="sf-template">目标模板</label>
+                <select id="sf-template"></select>
+              </div>
+              <div class="sf-row">
+                <label for="sf-granularity">编辑粒度</label>
+                <select id="sf-granularity">
+                  <option value="template">整模板</option>
+                  <option value="feature">定点特征</option>
+                </select>
+              </div>
+              <div class="sf-row" id="sf-feature-row" hidden>
+                <label for="sf-feature">目标特征</label>
+                <select id="sf-feature"></select>
+              </div>
+              <div class="sf-row">
+                <label for="sf-operation">操作</label>
+                <select id="sf-operation"></select>
+              </div>
+              <div id="sf-params" class="sf-params"></div>
+              <div id="sf-hint" class="sf-hint"></div>
+              <button id="btn-add-step" class="step-add">＋ 添加步骤到草稿</button>
+            </div>
+          </div>
+        </aside>
+
+        <section class="center-pane">
+          <div class="pane-tools">
+            <div class="tb-group">
+              <button id="rail-toggle-2" title="收起/展开左右侧栏（折叠后此按钮仍常驻，可再展开）">侧栏</button>
+              <button class="layout-btn" data-layout="split-h" title="左右分屏">左右分屏</button>
+              <button class="layout-btn" data-layout="split-v" title="上下分屏">上下分屏</button>
+              <button class="layout-btn" data-layout="ab-switch" title="A/B 切换（单视图）">A/B 切换</button>
+              <button class="layout-btn" data-layout="overlay" title="叠影（基线幽灵）">叠影</button>
+              <button id="ab-toggle" title="切换 A/B 显示端">A/B：当前为草稿，切到基线</button>
+            </div>
+            <div class="tb-group">
+              <button class="range-btn" data-range="root">整装配</button>
+              <button class="range-btn" data-range="assembly">子装配</button>
+              <button class="range-btn" data-range="part">零件</button>
+            </div>
+            <div class="tb-group" id="observe-tools">
+              <label class="ob-item" title="多层级爆炸分解（两视口同步）">爆炸
+                <input id="ob-explode" type="range" min="0" max="100" value="0" />
+              </label>
+              <label class="ob-item" title="剖切（两视口同步）">剖切
+                <input id="ob-section-on" type="checkbox" />
+                <select id="ob-section-axis">
+                  <option value="X">X</option><option value="Y">Y</option><option value="Z" selected>Z</option>
+                </select>
+                <input id="ob-section-pos" type="range" min="0" max="100" value="50" />
+                <button id="ob-section-flip" title="保留另一侧">反向</button>
+              </label>
+              <button id="ob-xray" title="透明鬼影（看内部配合）">鬼影</button>
+              <div class="ob-item" title="视角书签：存取当前双视口视角">
+                <button id="ob-cam-save" title="存到当前书签">存</button>
+                <button class="cam-bm" data-bm="1" title="恢复书签 1">1</button>
+                <button class="cam-bm" data-bm="2" title="恢复书签 2">2</button>
+                <button class="cam-bm" data-bm="3" title="恢复书签 3">3</button>
+              </div>
+              <button id="cam-sync" class="active" title="双视口视角同步开/关">视角同步</button>
+              <button id="move-toggle" title="移动模式：在草稿视口拖拽调整零件位置（生成 move 步骤）">移动零件</button>
+            </div>
+            <div class="tb-group" style="margin-left:auto">
+              <button id="nav-drawing" class="sess-btn ghost" title="打开图纸对照">图纸</button>
+            </div>
+          </div>
+
+          <div class="viewport-pair">
+            <div class="viewport base">
+              <div class="vp-label">基线 <span class="vp-sub">（锁定）</span></div>
+              <div id="vp-base"></div>
+              <div id="tree-base" class="mini-tree hidden"></div>
+            </div>
+            <div class="viewport draft">
+              <div class="vp-label">草稿 <span class="vp-sub">（实时）</span></div>
+              <div id="vp-draft"></div>
+              <div id="tree-draft" class="mini-tree hidden"></div>
+            </div>
+          </div>
+
+          <div class="drawer-tabs">
+            <button class="drawer-tab active" data-drawer="steps">草稿步骤</button>
+            <button class="drawer-tab" data-drawer="verify">验证</button>
+            <button class="drawer-tab" data-drawer="diff">差异</button>
+          </div>
+          <div class="drawer-body">
+            <div class="drawer-pane active" data-drawer="steps">
+              <div id="drawer-steps" class="steps-list"></div>
+              <div id="drawer-steps-form"></div>
+            </div>
+            <div class="drawer-pane" data-drawer="verify">
+              <div id="drawer-verify"></div>
+            </div>
+            <div class="drawer-pane" data-drawer="diff">
+              <div id="drawer-diff"></div>
+            </div>
+          </div>
+        </section>
+
+        <aside class="rail rail-right">
+          <div class="rail-head">
+            <span class="rail-title">验证轨道</span>
+            <button id="verify-exact" class="rail-btn" title="布尔精检（大装配体可能耗时数十秒）；确认保存时也会自动精检">精确检查</button>
+          </div>
+          <div class="rail-body">
+            <div id="verify-hint" class="verify-hint info">等待草稿步骤变更…（自动检查为 AABB 快速粗筛）</div>
+            <div class="rail-subtitle">干涉</div>
+            <div id="verify-interferences" class="verify-block">
+              <div class="empty placeholder">— 步骤变更后自动增量检查</div>
+            </div>
+            <div class="rail-subtitle">已编辑模板</div>
+            <div id="verify-edited" class="verify-block">
+              <div class="empty placeholder">— 尚未编辑任何模板</div>
+            </div>
+            <div class="rail-subtitle">FEA 对比</div>
+            <div id="fea-compare" class="verify-block">
+              <div class="empty placeholder">— 基线 vs 草稿双跑（需 FreeCAD 插件）</div>
+            </div>
+            <div class="rail-subtitle">差异摘要</div>
+            <div id="verify-diff" class="verify-block">
+              <div class="empty placeholder">— 体积 / 表面积（随草稿步骤刷新）</div>
+            </div>
+          </div>
+        </aside>
+      </div>
+    </div>
+
+  </body>
+</html>

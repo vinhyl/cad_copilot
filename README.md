@@ -3,9 +3,10 @@
 > 版本：**v0.1.0** — 变更记录见 [CHANGELOG.md](CHANGELOG.md)
 
 本地 AI CAD Copilot 工具链：`cad_service.py`（Web 服务：3D 装配视口 + 特征拾取 +
-编辑闭环 + 图纸对照 + FEA/渲染任务），配套 MCP server 供 agent 以 stdio 调用同一套
-几何能力（双 transport，共享库层与缓存）。所有交互界面集中在 Web 前端
-（`/app`）；历史上"生成静态 HTML 预览"的三个 CLI 出口已随 Web UI 落地而退役。
+编辑会话（草稿模式）+ 版本管理 + 报告中心 + 图纸对照 + FEA/渲染任务），配套
+MCP server 供 agent 以 stdio 调用同一套几何能力（双 transport，共享库层与缓存）。
+交互界面集中在 Web 前端（`/app` 多页应用：首页 / 编辑 / 图纸 / 报告）；agent 经
+会话工具组读写草稿与用户选中上下文，**确认落版本永远留给用户**。
 
 ## 环境要求
 - Python 3.13（3.12+ 一般也可，但 OCP 轮子按 3.13 验证；`cadquery-ocp-novtk` / `build123d` 已确认有 cp313 wheel 可用）
@@ -23,7 +24,7 @@ Windows 与 macOS 上命令**完全相同**；仅首次运行需联网。
 
 `bootstrap.py` 只负责环境（venv + 依赖）。**部署阶段还需由 agent 把 `cad-engine`
 接入所用客户端**（见下文「MCP Server 使用」的连接片段）；登记后需在客户端点
-**Trust** 启用，agent 才能调用那 10 个 CAD 工具（`build123d_model` 默认禁用）。
+**Trust** 启用，agent 才能调用那 17 个 CAD 工具（`build123d_model` 默认禁用）。
 
 ### 部署阶段：ODA 插件（DWG 支持，默认启用）
 
@@ -59,14 +60,15 @@ venv/Scripts/python cad_service.py   # Windows（token 启动时打印）
 venv/bin/python        cad_service.py   # macOS / Linux
 ```
 浏览器打开 `http://127.0.0.1:8764/app?token=<启动时打印的 token>`——上传/拖入
-STEP 即得 3D 装配视口 + 特征拾取 + 编辑闭环。详见下文「本地 Web 服务」与
-「Web 前端」两节。
+STEP 即得 3D 装配视口 + 特征拾取 + 编辑会话（草稿模式）。详见下文「本地 Web
+服务」与「Web 前端」两节。
 
 ## MCP Server 使用
 
 `cad_mcp_server.py` 是一个基于 FastMCP 的 stdio MCP server，把上面的几何能力暴露给
-WorkBuddy 等 agent 调用。它当前提供 **11 个工具**（详见下表），其中 `build123d_model`
-出于安全考虑**默认禁用**。
+WorkBuddy 等 agent 调用。它当前提供 **18 个工具**（详见下表）：11 个几何工具 +
+7 个会话协作工具（读写草稿 / 读用户选中 / 会话发现 / 版本切换 / 生成报告），
+其中 `build123d_model` 出于安全考虑**默认禁用**。
 
 ### 启动（stdio）
 ```bash
@@ -101,7 +103,7 @@ venv/bin/python        cad_mcp_server.py    # macOS / Linux
 > `~/.cursor/mcp.json`、VS Code `.vscode/mcp.json`（键名/结构不同，需按该客户端格式适配）。
 > 写入后仍需在客户端点 **Trust** 启用。
 
-### 11 个工具一览
+### 18 个工具一览
 | 工具 | 说明 | 默认状态 |
 |------|------|---------|
 | `convert_file` | STEP/IGES/STL/BREP 格式互转 | ✅ 启用 |
@@ -114,11 +116,18 @@ venv/bin/python        cad_mcp_server.py    # macOS / Linux
 | `parse_assembly` | 装配体 STEP → 装配树 + 4×4 矩阵 + 去重零件模板（glTF 缓存，Web 前端 Template+Matrix 数据源） | ✅ 启用 |
 | `check_interference` | 装配体全实例对布尔干涉审计（确定性守门，D8） | ✅ 启用 |
 | `audit_assembly` | 一键体检：干涉 + DFM 规则（小孔/深孔/薄壁，模块七） | ✅ 启用 |
+| `list_sessions` | 会话发现：服务端最近打开的装配体（cacheKey / 时间 / 草稿步骤数），跨浏览器同步 | ✅ 启用 |
+| `get_user_selection` | 读用户当前选中（零件 / 特征 + 所在页面 / 标签页，多窗口区分）——"这个零件厚度加 1mm"式对话的上下文来源 | ✅ 启用 |
+| `read_draft` | 读当前草稿步骤表（声明式、多目标、可增删） | ✅ 启用 |
+| `preview_draft` | 触发草稿重放预览（草稿几何 + 增量干涉结果） | ✅ 启用 |
+| `edit_draft` | **只写草稿不落版本**：追加 / 替换 / 删除草稿步骤；落版本由用户在 Web UI 点「确认保存」 | ✅ 启用 |
+| `checkout_version` | 版本切换 / 回滚（指针切换，历史文件永不重写） | ✅ 启用 |
+| `generate_report` | 生成装配体快照报告（体检 + 统计 + 版本历史） | ✅ 启用 |
 | `build123d_model` | 运行 build123d 建模脚本（**执行任意代码 = 本地代码执行**） | ⛔ **默认禁用**（设 `CAD_MCP_ALLOW_BUILD123D=1` 才启用） |
 
 > 安全提示：`build123d_model` 会以 MCP server 进程的完整权限执行传入的任意 Python
 > 脚本，等于本地代码执行。它被默认禁用，且每次调用都强制走超时隔离子进程。
-> **切勿**在不可信、共享或多租户环境中启用。其余 10 个工具的路径都被限制在
+> **切勿**在不可信、共享或多租户环境中启用。其余 17 个工具的路径都被限制在
 > `CAD_MCP_ALLOWED_DIRS` 白名单内（默认 `.`，即 server 工作目录）。
 
 > 数据隐私备注：Agent 调用本 server 时，工具返回值（特征元数据 / 物性 / 文件清单 /
@@ -127,7 +136,7 @@ venv/bin/python        cad_mcp_server.py    # macOS / Linux
 > 评测飞轮。复评触发点：Phase C 自然语言修改上线前 / 对外分发前 / 更换模型供应商。
 > 完整分析见 [ADR-0002 风险登记 R10](docs/decisions/0002-web-copilot-expansion.md)。
 
-## 本地 Web 服务（Phase A 骨架）
+## 本地 Web 服务
 
 `cad_service.py` 是面向 Web 前端的本地服务层（starlette，随 fastmcp 附带，
 **零新增依赖**），与 MCP server 共享同一套工具库（ADR-0002 D2 双 transport）。
@@ -142,8 +151,20 @@ venv/Scripts/python cad_service.py     # http://127.0.0.1:8764（token 启动时
 | `GET /api/config` | 启动配置（allowed_dirs，前端路径引导用） |
 | `POST /api/upload?name=` | **显式授权输入通道**：原始请求体 → 内容寻址落盘 `uploads/<sha256>/`（同内容去重回路径） |
 | `POST /api/assembly/parse` | 装配 STEP → manifest + 写缓存（Bearer token） |
+| `GET /api/assembly/view?cache_key=` | cacheKey 直载已缓存装配体（不读源文件、不重 parse；回首页 / 最近列表 / URL 引导通道） |
 | `POST /api/assembly/edit` | **写操作**：模板编辑 → 干涉守门 → 原子版本提交（409 = 干涉拒绝） |
 | `GET /api/assembly/audit?cache_key=` | 一键体检：干涉 + DFM 规则（确定性计算） |
+| `GET /api/drafts?cache_key=` | 草稿读取（单槽位：声明式步骤表） |
+| `POST /api/drafts/save` | 手动保存草稿（单槽位覆盖） |
+| `DELETE /api/drafts?cache_key=` | 放弃草稿（清空步骤与预览产物） |
+| `POST /api/drafts/preview` | 草稿重放 → 草稿 manifest + 增量干涉（`level=bbox` 默认 AABB 粗筛毫秒级 / `exact` 布尔精检） |
+| `POST /api/drafts/confirm` | **确认保存**：全部草稿步骤原子落为一个版本（守门始终 exact 布尔） |
+| `POST /api/drafts/fea-compare` | FEA 双跑对比：基线 vs 草稿目标模板静力学（R5 job 模式） |
+| `POST /api/reports/generate` | 生成快照报告（体检 + 统计 + 版本历史聚合） |
+| `GET /api/reports[?cache_key=]` / `GET /api/reports/get` | 报告列表 / 单份报告读取 |
+| `GET /api/sessions` | 服务端最近会话列表（前端「最近使用」数据源，跨浏览器同步） |
+| `POST` / `GET /api/selection` | 用户选中上行 / 读取（零件 / 特征 + page + tab，多窗口区分；agent 经 `get_user_selection` 消费） |
+| `POST` / `GET /api/logs/client` | 前端错误上报（error / unhandledrejection + 堆栈）/ 查询 |
 | `POST /api/drawing/import` | 图纸导入：DXF 直读 / DWG 经 ODA 转换 + 语义提取 |
 | `GET /api/versions?cache_key=` | 版本列表（v0 基线 + v1..vN） |
 | `POST /api/versions/checkout` | 版本切换/回滚（指针切换，文件永不重写） |
@@ -156,32 +177,47 @@ venv/Scripts/python cad_service.py     # http://127.0.0.1:8764（token 启动时
 | `GET /cache/{key}/...` | 静态服务缓存产物（tree_structure.json / gltf_library，防目录穿越） |
 | `GET /versions/{key}/...` | 静态服务版本几何（防目录穿越） |
 | `GET /drawings/{key}/...` | 静态服务图纸 SVG（防目录穿越） |
-| `GET /app/` | Web 前端 SPA（`frontend/dist` 构建产物，见下节） |
-| `WS /ws?token=...` | JSON 协议骨架（ping / parse）；长任务进度已由 R5 HTTP job 协议承接（上表 /api/jobs），WS 留作后续推送通道 |
+| `GET /drafts/{key}/...` | 静态服务草稿预览 glTF（防目录穿越） |
+| `GET /app/` | Web 前端多页应用（`frontend/dist` 构建产物，见下节） |
+| `WS /ws?token=...` | JSON 协议（ping / parse）+ **事件广播**：`draft_saved` / `draft_deleted` / `version_changed` / `selection_changed` / `report_added`——agent 内置浏览器与系统浏览器双开时状态互通 |
 
 要点：缓存目录按源文件 **SHA-256 前 16 位** 命名——同内容重复导入直接命中
-（`cache_hit: true`），内容变化自动换键（R8/R17）；几何操作全局串行锁（R4）；
-仅绑 127.0.0.1、token 鉴权、无 CORS（延续约束一）。
+（`cache_hit: true`），内容变化自动换键（R8/R17）；几何操作全局串行锁（R4），
+但 OCP 重活已下放线程池——长任务（报告生成 / 布尔精检）执行期间服务保持响应
+（health / 静态文件 / WS 不冻结）；模板形状按 (path, mtime) 进程级缓存（未编辑
+几何不重读 STEP）；仅绑 127.0.0.1、token 鉴权、无 CORS（延续约束一）。
+服务日志：`workspace/logs/service.log`（访问日志 + SLOW 标记 + 异常堆栈，
+2 MB × 3 轮转）；前端错误经 `/api/logs/client` 汇入同一日志体系。
 配置：`CAD_SERVICE_TOKEN` / `CAD_SERVICE_ALLOWED_DIRS` / `CAD_SERVICE_WORKSPACE` /
 `CAD_SERVICE_HOST` / `CAD_SERVICE_PORT` / `CAD_SERVICE_FRONTEND_DIR`。
 
-## Web 前端（Phase A/B）
+## Web 前端（多页 MPA）
 
-`frontend/` 为 Vite + three.js（three@0.160.0，npm 锁定版本）+ 原生 JS 的
-SPA：加载装配 STEP → **Template+Matrix 实例化渲染**（每个唯一零件一份 glTF
-几何，全部实例共享 `InstancedMesh`，矩阵来自 manifest 的累积世界 4×4）+ 装配树 UI
-（选择层级双向联动：树上点选高亮 3D 实例 / 视口点选定位树上节点；按节点显隐）。
+`frontend/` 为 Vite **多入口 MPA** + three.js（three@0.160.0，npm 锁定版本）+
+原生 JS，四个页面按职责拆分（页面间经 URL 参数传递 cacheKey / scope）：
+
+| 页面 | 入口 | 职责 |
+|---|---|---|
+| 首页 | `/app/`（index.html） | 装配预览（**Template+Matrix 实例化渲染**：每唯一零件一份 glTF、实例共享 `InstancedMesh`；装配树双向联动）、选取、**上下文动作区**（按选中层级：装配体 / 子装配体 / 零件动态切换操作）、体检 / 力学 / 渲染 / 图纸 / 编辑入口 |
+| 编辑会话 | `/app/edit.html` | 草稿模式编辑闭环（见下） |
+| 图纸对照 | `/app/drawing.html` | DXF / DWG 语义对照独立页 |
+| 报告中心 | `/app/report.html` | 快照报告浏览（体检 + 统计 + 版本历史） |
+
+代码分层：`pages/`（home / edit / drawing / report 页逻辑）+ `shared/`
+（utils / jobs / plugins / api / scene / tree）。
 
 **输入交互**（路径手输已移除，三条显式通道 + agent 入口）：
 
 - **「打开文件…」/ 拖放**：任意位置文件经 `POST /api/upload` 显式授权进入——
   内容寻址落盘 `uploads/<sha256>/<文件名>`（重复上传去重回路径），前端按扩展名
   自动路由（STEP → 装配加载；DXF/DWG → 图纸对照导入）
-- **最近使用**：localStorage 记录最近 8 个成功加载文件，点击重载（内容寻址缓存
-  命中秒开），与 uploads 路径去重联动
-- **agent 预览入口**：`/app?token=...&load=<encodeURIComponent(路径)>` 一次性
-  URL 参数——agent（内置浏览器 navigate 或生成链接）驱动加载，路径仍受服务端
-  `safe_input_path` 权威校验
+- **最近使用**：**服务端会话列表**（`GET /api/sessions`，跨浏览器同步）——
+  点击经 `GET /api/assembly/view` 按 cacheKey 直载（源文件移动 / 删除后仍可
+  打开，缓存命中秒开）
+- **agent 预览入口**：`/app?token=...&load=<encodeURIComponent(路径)>` 或
+  `?cacheKey=<键>`——agent（内置浏览器 navigate 或生成链接）驱动加载；`?token=`
+  / `?load=` / `?cacheKey=` **保留在地址栏**（agent 内置浏览器"用系统浏览器打开"
+  后免重新输入 token），路径仍受服务端 `safe_input_path` 权威校验
 - 白名单外的路径（绕过前置校验时）：403 + 可操作文案（移入目录 / 设
   `CAD_SERVICE_ALLOWED_DIRS`），`GET /api/config` 供前端展示可访问目录
 
@@ -193,35 +229,50 @@ SPA：加载装配 STEP → **Template+Matrix 实例化渲染**（每个唯一�
 阶段中文映射 + 进度条（FEA 中继内层 FreeCAD 七阶段真实进度；渲染为不确定
 进度），支持取消（协作式终止）；FEA 完成出结果摘要，渲染完成弹大图。
 
-**Phase B 视图操作集**（视图状态 ≠ 数据状态，全部不落盘）：
+**视图操作集**（视图状态 ≠ 数据状态，全部不落盘；首页与编辑页共用 scene.js）：
 
 | 操作 | 入口 | 说明 |
 |---|---|---|
-| 多层级爆炸 | 工具栏滑条 | 后端算好的相对 explode 向量沿祖先链累积 × 比例 |
+| 多层级爆炸 | 工具栏 / 观察工具条滑条 | 后端算好的相对 explode 向量沿祖先链累积 × 比例 |
 | 特征拾取 | 选中零件 → 侧栏特征面板 | 点特征条目 → 3D 橙色高亮 overlay（cache `features/*.json|gltf`） |
-| 隔离 / X 光 / 剖切面 | 工具栏 | 只显选中子树 / 半透明鬼影 / Z 轴 clipping plane |
+| 隔离 / X 光 / 剖切面 | 工具栏 / 观察工具条 | 只显选中子树 / 半透明鬼影 / 三轴（X/Y/Z）clipping plane |
 | 临时拖拽移动 | 选中 →「移动」 | TransformControls gizmo，选装配体整组移动；「复位移动」还原 |
 | 相机书签 | 「存视角 / 回视角」 | localStorage，不进版本树 |
 | 复位视图 | 一键 | 爆炸/显隐/临时移动/相机全部还原 |
 
-**Phase C 编辑闭环**（选中零件 → 侧栏编辑面板）：
+**编辑会话页（草稿模式编辑闭环）**：
 
-- 整模板操作：钻孔（位置/半径/深度）、倒角、圆角、缩放
-- **定点特征编辑（R1）**：特征面板的孔特征带「扩径」按钮——只改选中的那个孔
-  （从特征元数据构造定向布尔）；编辑后特征缓存经**指纹匹配**保持 id 稳定
-  （跨版本认出"同一个孔"，changelog 语义化如 `孔 #1.2: R1.0 -> R1.6`）
-- 流程：**编辑 → 干涉守门（BRepAlgoAPI_Common，逐实例布尔 + bbox 预筛）→ 原子版本提交**
-  （R6 临时目录 + rename）；干涉时 409 结构化拒绝（涉及零件对 + 穿透体积 mm³），
-  几何保持当前版本不变（R15）
-- 版本面板：v0 基线 + v1..vN 链式增量（每版本只存被改模板的 step/gltf），
-  切换/回滚 = 指针移动，历史版本文件永不重写（D10）
+- **双视口**：基线锁定（永远不动，对比基准）vs 草稿实时（重放当前步骤表）；
+  **相机联动**可锁/解锁（开启即对齐）；观察工具条（爆炸 / 三轴剖切 / 鬼影 /
+  视角书签）两视口同步生效
+- **声明式草稿步骤表**（左栏）：多目标、可增删；每步变更自动触发草稿重放 +
+  干涉检查——**分级**：默认 AABB 粗筛（毫秒级，黄色「可能碰撞」卡片），
+  「精确检查」按钮显式布尔精检（红色卡片带穿透体积 mm³ + 耗时秒数）；
+  **确认保存的后端守门始终 exact 布尔**（D8 不降级）
+- **五级级联操作表单**：目标模板 → 编辑粒度 → 特征 → 操作 → 参数（特征选项
+  按类型过滤，来自 `features/tN.json`）；**移动模式**：草稿视口拖拽零件生成
+  move 步骤（实例级世界系位移，参与干涉检查与版本落盘；同节点替换不累积；
+  基线视口不动）
+- **预览范围**：整装配 / 子装配 / 零件 三档 visibility lens 切换（不换页），
+  切换**自动取景**到目标包围盒；目标模板高亮；双视口点选联动
+- **验证轨道**（右栏）：增量干涉 + FEA 基线 vs 草稿双跑对比（最大位移 /
+  von Mises 应力，R5 job 进度）；步骤变更后已有结果标记过期
+- **导航语义**：回首页（保留装配体，view 直载）/ 放弃草稿（步骤清空回基线）/
+  保存草稿（单槽位）/ 确认修改（全部步骤原子落为一个版本，回首页）
+- **协作边界**：agent 经 MCP 只写草稿（`edit_draft`），「确认保存」按钮永远
+  留给用户
+- **直接落版本路径**（Phase C 兼容保留）：首页选中零件 → 编辑面板 →
+  **编辑 → 干涉守门 → 原子版本提交**（409 结构化拒绝含零件对 + 穿透体积）；
+  版本面板 v0 基线 + v1..vN 链式增量（每版本只存被改模板的 step/gltf +
+  实例 moves），切换/回滚 = 指针移动，历史版本文件永不重写（D10）
 
 **一键体检（模块七）**：工具栏「体检」→ 干涉全实例对审计 + DFM 规则
 （小孔 R<0.5 / 深孔 L/D>10 / 平行孔薄壁提示），全部确定性计算（D8）。
 
-**图纸对照（D5）**：工具栏「图纸」→ DXF 直读 / DWG 经 ODA（探测降级，缺失时
-明确提示装 ODA 或转存 DXF）；**语义提取**（螺纹 M10x1.5 / 直径 Ø8 / 公差 H7/g6，
-模块六语义真理）+ 轻依赖 SVG 渲染（LINE/CIRCLE/ARC/LWPOLYLINE/TEXT，零 PIL 依赖）。
+**图纸对照（D5）**：独立页（drawing.html，首页「图纸」入口跳入）→ DXF 直读 /
+DWG 经 ODA（探测降级，缺失时明确提示装 ODA 或转存 DXF）；**语义提取**（螺纹
+M10x1.5 / 直径 Ø8 / 公差 H7/g6，模块六语义真理）+ 轻依赖 SVG 渲染
+（LINE/CIRCLE/ARC/LWPOLYLINE/TEXT，零 PIL 依赖）。
 
 - **使用（零 Node 依赖）**：`venv/Scripts/python cad_service.py` 后浏览器打开
   `http://127.0.0.1:8764/app/`，token 支持 `?token=...` 一次性注入。构建产物
@@ -257,10 +308,14 @@ venv/Scripts/python mcp_test.py    # Windows
 ```
 workspace/
 ├── uploads/<sha256>/<文件名>   # 上传通道落盘（内容寻址去重）
-├── cache/<sha16>/              # 装配解析缓存（tree_structure.json + gltf_library + features）
+├── cache/<sha16>/              # 装配解析缓存（tree_structure.json + gltf_library + parts + features）
 ├── drawings/<sha16>/           # 图纸缓存（ODA 转换 DXF + 渲染 SVG）
 ├── fea/ render/                # FEA / Blender 任务产物
-└── versions/<sha16>/           # 增量版本历史（v0 基线 + v1..vN）
+├── versions/<sha16>/           # 增量版本历史（v0 基线 + v1..vN，含实例 moves）
+├── drafts/<sha16>/             # 草稿（步骤表 + 预览 glTF，单槽位）
+├── reports/<sha16>/            # 快照报告（体检 + 统计 + 版本历史）
+├── selection/                  # 会话与选中状态（最近会话列表 / 用户选中上行）
+└── logs/service.log            # 服务日志（访问 + SLOW + 异常堆栈，2 MB × 3 轮转）
 ```
 
 `workspace/` 属于**生成产物**，已被 `.gitignore` 忽略，不进版本库。
@@ -271,14 +326,14 @@ workspace/
 - `cad_service.py` — 本地 Web 服务层（Phase A 骨架，starlette）：HTTP + WS 双通道、token 鉴权、SHA 键控幂等缓存（ADR-0002 D2 / R4 / R8 / R17）
 - `feature_locator.py` — 特征识别库：曲面枚举 + 分类聚合 + 模式识别（Feature 模型 + 类型注册表）
 - `feature_picker.py` — 特征枚举库：`collect_feature_solids`（cad_service 特征缓存的上游，Web 视口拾取数据源）
-- `cad_mcp_server.py` — FastMCP server（**11 工具**；`pick_features` / `parse_assembly` / `check_interference` / `audit_assembly` 已接入；`build123d_model` 默认禁用）
+- `cad_mcp_server.py` — FastMCP server（**18 工具**：11 几何 + 7 会话协作——读写草稿 / 读用户选中 / 会话发现 / 版本切换 / 报告；`build123d_model` 默认禁用）
 - `cad_versions.py` — 增量版本仓库（Phase C）：原子提交（R6）/ 解析链 / 指针回滚（D10）
 - `cad_drawing.py` — 图纸导入与语义校准（Phase D，D5/模块六）：DXF 直读 / DWG 经 ODA（探测降级）+ 螺纹/直径/公差提取 + 轻依赖 SVG 渲染
 - `cad_jobs.py` — R5 任务管理器：job 状态机 / 进度 / 协作式取消（FEA / 渲染长任务）
 - `cad_fea.py` / `cad_render.py` — FEA（FreeCAD+CalculiX）与渲染（Blender）子进程插件（探测降级 + 缓存 + 进度中继）
 - `evals/` — 评测基准集（D9）：指令三层标注 + `run_evals.py`（黄金轨迹回放 + 几何断言全自动化；LLM 对比层后续接入）
 - `cad_build.py` — build123d 字体 import-hook（跨平台无害，修复损坏系统字体导致 import 崩溃）
-- `frontend/` — Web 前端 SPA（Vite + three.js，Phase A 骨架）；`dist/` 构建产物随仓库提交（离线运行无需 Node）
+- `frontend/` — Web 前端多页 MPA（Vite + three.js：首页 / 编辑 / 图纸 / 报告四入口，`pages/` + `shared/` 分层）；`dist/` 构建产物随仓库提交（离线运行无需 Node）
 - `tests/` — pytest 测试套件（Phase 3 建立；Phase A/B/C/D 增装配/服务层/编辑流/图纸用例，当前 **185 个用例全绿**）
 - `pytest.ini` — pytest 配置（含 `--cov` 覆盖率）
 - `docs/architecture/copilot-vision.md` — Web Copilot 系统设想（原根目录 `设想.txt` 迁入；文首附与 ADR-0002 的差异摘要）

@@ -32,7 +32,13 @@ export class AssemblyTree {
     const row = this.rows.get(nodeId);
     if (row) {
       row.classList.add('selected');
-      row.scrollIntoView({ block: 'nearest' });
+      // 只滚动树容器自身（scrollIntoView 会连带滚动页面等祖先容器）
+      const cRect = this.container.getBoundingClientRect();
+      const rRect = row.getBoundingClientRect();
+      if (rRect.height > 0) {
+        if (rRect.top < cRect.top) this.container.scrollTop -= cRect.top - rRect.top;
+        else if (rRect.bottom > cRect.bottom) this.container.scrollTop += rRect.bottom - cRect.bottom;
+      }
     }
   }
 

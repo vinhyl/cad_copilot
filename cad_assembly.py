@@ -53,10 +53,15 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
+import threading
 
 import cad_core
 
-SCHEMA_VERSION = 2   # v2: + explode vectors, + parts/*.step, + features/*
+SCHEMA_VERSION = 4   # v4: 模板/节点名 GBK 乱码还原（复刻 OCCT UTF-8 解码器，
+                     #     基于源 STEP 原始字节建 乱码->正确名 映射）
+                     # v3: features glTF 网格偏差与模板导出对齐（overlay 共面）
+                     # v2: + explode vectors, + parts/*.step, + features/*
 
 
 # --------------------------------------------------------------------------
@@ -105,6 +110,81 @@ def _label_name(label):
         if s and not s.startswith("Open CASCADE"):
             return s
     return None
+
+
+# --------------------------------------------------------------------------
+# GBK 乱码还原：复刻 OCCT 读取 STEP 字符串的 UTF-8 解码（NCollection_UtfIterator）
+# --------------------------------------------------------------------------
+# SolidWorks 导出 STEP 时把中文名按 Windows 代码页（GBK）写入文件；OCCT 读取器
+# 默认按 UTF-8 解码（Resource_FormatType_UTF8 -> TCollection_ExtendedString(bytes,
+# isMultiByte=true)），两套编码错位产生乱码。
+#
+# 解码器（NCollection_UtfIterator::readUTF8，旧版 6 字节 UTF-8）：
+#   k = UTF8_BYTES_MINUS_ONE[b0]         # 额外字节数（0..5）
+#   逐个字节 <<6 累加后减去 offsetsFromUTF8[k] -> 符号码点
+#   任一符号码点 > 0x10FFFF 时 ConvertToUnicode 返回 false -> 整串回退逐字节 Latin-1
+#
+# 此外 STEP 读取器把字符串字面量（含首尾撇号 "'...'"）整体交给解码器，之后跳过
+# 开头撇号并按长度-1 裁掉末字符；若末尾多字节序列吞掉了撇号，被裁掉的是真实名字
+# 的末字符（如 "平头刺针" 末尾 EB 被裁）。
+#
+# 据此对每条 GBK 名字可正向算出 OCCT 最终输出的乱码串，构建 乱码->正确名 映射表，
+# 在模板/树节点名读取后直接替换（对任何 GBK STEP 均有效，不依赖上游导出设置）。
+UTF8_BYTES_MINUS_ONE = [0] * 192 + [1] * 32 + [2] * 16 + [3] * 8 + [4] * 4 + [5] * 4
+OFFSETS_FROM_UTF8 = (0x00000000, 0x00003080, 0x000E2080,
+                     0x03C82080, 0xFA082080, 0x82082080)
+UTF32_MAX_LEGAL = 0x10FFFF
+
+
+def _occt_decode(raw: bytes) -> str | None:
+    """精确复刻 OCCT readUTF8；整串任一符号非法返回 None（应整体回退 Latin-1）。"""
+    out = []
+    i, n = 0, len(raw)
+    while i < n:
+        b = raw[i]
+        k = UTF8_BYTES_MINUS_ONE[b]
+        # readUTF8 无条件读 k+1 字节（不越界保护）；末尾不足时以 0x00 补齐模拟 NUL
+        seg = raw[i:i + k + 1]
+        if len(seg) < k + 1:
+            seg = seg + b"\x00" * (k + 1 - len(seg))
+        code = 0
+        for byte in seg:
+            code = ((code << 6) + byte) & 0xFFFFFFFF
+        code = (code - OFFSETS_FROM_UTF8[k]) & 0xFFFFFFFF
+        if code > UTF32_MAX_LEGAL:
+            return None
+        if code == 0:
+            break  # 迭代器遇 NUL 符号终止（尾随截断序列被丢弃）
+        out.append(chr(code))
+        i += k + 1
+    return "".join(out)
+
+
+def _occt_name(raw: bytes) -> str:
+    """OCCT 读取该字符串字面量后得到的最终名字（模拟 cleanText 链路）。"""
+    full = b"'" + raw + b"'"
+    dec = _occt_decode(full)
+    if dec is None:
+        return "".join(chr(x) for x in full)[1:-1]
+    return dec[1:-1]
+
+
+def build_mojibake_fixmap(step_path: str) -> dict:
+    """扫描 STEP 全部引号字符串，返回 {乱码名: 正确GBK名} 映射（仅含非 ASCII 名）。"""
+    data = open(step_path, "rb").read()
+    fixmap = {}
+    for raw in set(re.findall(rb"'((?:[^']|'')*)'", data)):
+        unesc = raw.replace(b"''", b"'")
+        try:
+            correct = unesc.decode("gbk")
+        except (UnicodeDecodeError, ValueError):
+            continue
+        if correct.isascii():
+            continue
+        moji = _occt_name(unesc)
+        if moji not in fixmap:
+            fixmap[moji] = correct
+    return fixmap
 
 
 def _label_entry(label) -> str:
@@ -345,6 +425,19 @@ def parse_assembly(input_path: str) -> dict:
     for i in range(1, roots.Length() + 1):
         walk(roots.Value(i), 0, gp_Trsf(), tree_children)
 
+    # GBK 乱码还原：SolidWorks 按 Windows 代码页写中文名，OCCT 按 UTF-8 误读产生
+    # 乱码；用源文件原始字节建 乱码->正确名 映射，替换模板与树节点名。
+    fixmap = build_mojibake_fixmap(input_path)
+    if fixmap:
+        for t in templates:
+            fixed = fixmap.get(t["name"])
+            if fixed:
+                t["name"] = fixed
+        for n in nodes:
+            fixed = fixmap.get(n["name"])
+            if fixed:
+                n["name"] = fixed
+
     # R2 兜底：无名零件给确定性回退名
     for t in templates:
         if not t["name"]:
@@ -428,11 +521,19 @@ def _export_template_gltf(shape, name, color, gltf_path: str) -> None:
 # Per-template feature export (Phase B 拾取 API 化)
 # --------------------------------------------------------------------------
 
-def _export_features_gltf(feature_solids: list, gltf_path: str) -> None:
+def _export_features_gltf(feature_solids: list, gltf_path: str,
+                          deflection: float) -> None:
     """Write one named XCAF shape per feature as a textual glTF.
 
     Node names in the glTF are the feature ids (e.g. "#3", "#7.2", "P1"),
     so the frontend can map metadata entries to overlay meshes 1:1.
+
+    ``deflection`` MUST equal the template glTF export's mesh deflection:
+    feature compounds reference the SAME faces (shared TShapes), so an
+    equal-deflection BRepMesh call reuses the triangulation already stored
+    on those faces and the overlay lands exactly coplanar with the part
+    surface (a finer/coarser value re-tessellates → overlay depth straddles
+    the part surface → striped gaps under depth testing).
     """
     from OCP.XCAFDoc import XCAFDoc_DocumentTool
     from OCP.TDataStd import TDataStd_Name
@@ -448,7 +549,7 @@ def _export_features_gltf(feature_solids: list, gltf_path: str) -> None:
     for f in feature_solids:
         lbl = st.AddShape(f["solid"], False)
         TDataStd_Name.Set_s(lbl, TCollection_ExtendedString(f["id"]))
-        BRepMesh_IncrementalMesh(f["solid"], 0.1)
+        BRepMesh_IncrementalMesh(f["solid"], deflection)
     w = RWGltf_CafWriter(TCollection_AsciiString(gltf_path), False)  # textual
     info = TColStd_IndexedDataMapOfStringString()
     if not w.Perform(doc, info, Message_ProgressRange()):
@@ -464,12 +565,14 @@ def _compute_features(shape):
 
 
 def _write_template_features(solids: list, meta: list,
-                             feats_dir: str, tid: str) -> str:
+                             feats_dir: str, tid: str,
+                             deflection: float) -> str:
     """Write feats_dir/tid.{json,gltf}; returns the relative metadata path."""
     os.makedirs(feats_dir, exist_ok=True)
     with open(os.path.join(feats_dir, f"{tid}.json"), "w", encoding="utf-8") as fh:
         json.dump(meta, fh, ensure_ascii=False, indent=2)
-    _export_features_gltf(solids, os.path.join(feats_dir, f"{tid}.gltf"))
+    _export_features_gltf(solids, os.path.join(feats_dir, f"{tid}.gltf"),
+                          deflection)
     return f"features/{tid}.json"
 
 
@@ -482,7 +585,9 @@ def _build_template_features(shape, feats_dir: str, tid: str) -> str | None:
     solids, meta = _compute_features(shape)
     if not solids:
         return None
-    return _write_template_features(solids, meta, feats_dir, tid)
+    # 与 _export_template_gltf 同偏差：见 _export_features_gltf docstring
+    return _write_template_features(solids, meta, feats_dir, tid,
+                                     _deflection_for(shape))
 
 
 def refresh_template_features(new_shape, cache_dir: str, tid: str) -> list:
@@ -498,7 +603,10 @@ def refresh_template_features(new_shape, cache_dir: str, tid: str) -> list:
     solids, meta = _compute_features(new_shape)
     if meta:
         restable_feature_ids(old_feats, meta)
-        _write_template_features(solids, meta, os.path.join(cache_dir, "features"), tid)
+        # 与编辑后模板 glTF 重导出（_export_template_gltf）同偏差，保持共面
+        _write_template_features(solids, meta,
+                                 os.path.join(cache_dir, "features"), tid,
+                                 _deflection_for(new_shape))
     return meta
 
 
@@ -754,7 +862,7 @@ def _world_instances(manifest: dict, template_shapes: dict) -> list:
             if shp is not None:
                 out.append({"id": node["id"], "name": node["name"],
                             "template": node["template"], "shape": shp,
-                            "trsf": t})
+                            "trsf": t, "matrix": m})
         for ch in node.get("children", []):
             walk(ch)
 
@@ -764,35 +872,71 @@ def _world_instances(manifest: dict, template_shapes: dict) -> list:
 
 def check_interference(manifest: dict, template_shapes: dict,
                        edited_template: str | None = None,
-                       edited_shape=None, tolerance: float = 0.01) -> list:
+                       edited_shape=None, tolerance: float = 0.01,
+                       edited_templates: dict | None = None,
+                       moved_ids: set | None = None,
+                       mode: str = "exact") -> list:
     """Boolean interference gate (D8: deterministic check, AI never guesses).
 
-    When edited_template is None: checks ALL instance pairs (static audit).
-    Otherwise: checks the edited template's instances (using edited_shape)
-    against every other instance, and edited instances against each other.
+    Substitution (in priority order):
+      1. ``edited_templates`` (dict tid -> shape): multi-template draft mode
+         (M2). All listed templates' instances are replaced at once.
+      2. ``edited_template`` + ``edited_shape``: single-template legacy
+         mode (Phase C edit path).
+
+    ``moved_ids`` (M6.5): set of node_ids whose placement changed (draft
+    move steps). The manifest passed in must already carry the moved
+    matrices; these instances join the "edited" candidate set so move-only
+    drafts get the same incremental check as shape edits.
+
+    ``mode``: 'exact' = boolean common volume (default, the real gate);
+    'bbox' = AABB overlap only (millisecond fast check for interactive
+    drag previews; hits carry ``potential: True`` and no volume -- exact
+    verdict is deferred to confirm-time / explicit recheck).
+
+    When no substitution/move is provided: checks ALL instance pairs
+    (static audit).  Otherwise: candidate pairs are
+      (edited instance, other instance) + (edited instance, edited instance)
+    where "edited" = instance of any substituted template OR a moved
+    instance. Bbox prefilter keeps the O(n²) boolean count near zero for
+    sparse assemblies.
 
     Returns a list of {a, b, volume_mm3} for each interfering pair
-    (common volume > tolerance). Empty list = no interference.
-    Bbox prefilter keeps the O(n²) boolean count near zero for sparse
-    assemblies.
+    (common volume > tolerance); bbox mode returns {a, b, potential} pairs.
+    Empty list = no interference.
     """
     from OCP.TopLoc import TopLoc_Location
     from OCP.BRepAlgoAPI import BRepAlgoAPI_Common
-    from OCP.BRepBndLib import BRepBndLib
-    from OCP.Bnd import Bnd_Box
     from OCP.GProp import GProp_GProps
     from OCP.BRepGProp import BRepGProp
 
-    def world_bbox(shape, trsf):
-        moved = shape.Moved(TopLoc_Location(trsf))
-        box = Bnd_Box()
-        box.SetGap(0.0)
-        BRepBndLib.Add_s(moved, box)
-        try:
-            return box.Get()
-        except TypeError:
-            pmin, pmax = box.Get()
-            return (pmin.X(), pmin.Y(), pmin.Z(), pmax.X(), pmax.Y(), pmax.Z())
+    # 本地 bbox 走模块级缓存（_local_bbox_cached）：同一模板的 79 个
+    # 实例形状相同 → 只算一次 BRepBndLib；world bbox = 8 角点 × 实例
+    # 矩阵纯 Python 数学。此前每实例每次都跑 BRepBndLib（~5s）。
+
+    def local_bbox(shape):
+        return _local_bbox_cached(shape)
+
+    def world_bbox(shape, matrix):
+        """本地 bbox 8 角点 × 实例矩阵（纯 Python，零 SWIG 调用）。
+
+        角点是「点」：必须应用平移分量。此前用 gp_Vec.Transformed——
+        向量变换不含平移（数学正确但类型用错），所有实例的世界 bbox
+        都坍缩在模板本地位置，位移/装配位置全部丢失。
+        matrix: manifest 节点 3x4 list（[[a,b,c,d],[e,f,g,h],[i,j,k,l]]）。
+        """
+        x0, y0, z0, x1, y1, z1 = local_bbox(shape)
+        if not matrix:
+            return (x0, y0, z0, x1, y1, z1)
+        r0, r1, r2 = matrix
+        xs, ys, zs = [], [], []
+        for x in (x0, x1):
+            for y in (y0, y1):
+                for z in (z0, z1):
+                    xs.append(r0[0]*x + r0[1]*y + r0[2]*z + r0[3])
+                    ys.append(r1[0]*x + r1[1]*y + r1[2]*z + r1[3])
+                    zs.append(r2[0]*x + r2[1]*y + r2[2]*z + r2[3])
+        return (min(xs), min(ys), min(zs), max(xs), max(ys), max(zs))
 
     def world_shape(shape, trsf):
         return shape.Moved(TopLoc_Location(trsf))
@@ -803,16 +947,35 @@ def check_interference(manifest: dict, template_shapes: dict,
         return p.Mass()
 
     insts = _world_instances(manifest, template_shapes)
-    # substitute edited shape for the edited template's instances
-    if edited_template is not None:
+
+    # substitute edited shapes for the edited templates' instances
+    edited_set = set()
+    if edited_templates:
+        for i in insts:
+            if i["template"] in edited_templates:
+                i["shape"] = edited_templates[i["template"]]
+                i["edited"] = True
+                edited_set.add(i["template"])
+    elif edited_template is not None:
         for i in insts:
             if i["template"] == edited_template:
                 i["shape"] = edited_shape
                 i["edited"] = True
+                edited_set.add(edited_template)
+    if moved_ids:
+        for i in insts:
+            if i["id"] in moved_ids:
+                i["edited"] = True
+        # 防御：moved_ids 全没命中时 any(edited)=False 会退化成全量
+        # O(n²) 检查（大装配 5 分钟级）。上游 apply_moves 已校验，
+        # 这里兜底直接调用方（如直接调 check_interference 的测试）。
+        if not any(i.get("edited") for i in insts):
+            raise ValueError(
+                f"moved_ids 未命中任何实例: {sorted(moved_ids)}")
 
     # candidate pairs
     pairs = []
-    if edited_template is None:
+    if not any(i.get("edited") for i in insts):
         pairs = [(i, j) for k, i in enumerate(insts)
                  for j in insts[k + 1:]]
     else:
@@ -827,7 +990,7 @@ def check_interference(manifest: dict, template_shapes: dict,
 
     def bbox_of(i):
         if i["id"] not in bboxes:
-            bboxes[i["id"]] = world_bbox(i["shape"], i["trsf"])
+            bboxes[i["id"]] = world_bbox(i["shape"], i.get("matrix"))
         return bboxes[i["id"]]
 
     def overlap(a, b):
@@ -839,6 +1002,13 @@ def check_interference(manifest: dict, template_shapes: dict,
     for i, j in pairs:
         bi, bj = bbox_of(i), bbox_of(j)
         if not overlap(bi, bj):
+            continue
+        if mode == "bbox":
+            # AABB 级快速反馈：重叠即「可能碰撞」，不做布尔（精确
+            # 判定延后到显式重检/确认保存的 exact 守门）
+            hits.append({"a": {"id": i["id"], "name": i["name"]},
+                         "b": {"id": j["id"], "name": j["name"]},
+                         "potential": True})
             continue
         common = BRepAlgoAPI_Common(world_shape(i["shape"], i["trsf"]),
                                     world_shape(j["shape"], j["trsf"]))
@@ -853,13 +1023,288 @@ def check_interference(manifest: dict, template_shapes: dict,
     return hits
 
 
+# ==========================================================================
+# M2: 草稿步骤表（声明式 · 多目标 · 可增删）
+# 模型：草稿 = 基线 step 出发按顺序串行应用编辑，不落版本。
+# ==========================================================================
+DRAFT_SCHEMA_VERSION = 1
+
+
+def replay_draft_shapes(cache_dir: str, manifest: dict, store,
+                         steps: list) -> dict:
+    """Replay the draft's ordered step list over the baseline geometry.
+
+    Returns ``{template_id: shape}`` for every template touched by the
+    draft (only the FINAL shape per template -- the chain collapses to
+    one shape per template regardless of how many steps touched it).
+
+    * Geometrically additive: each step's new shape becomes the input to
+      the next step on the same template (serial replay).
+    * ``move`` steps are instance-level (node_id addressing) and change no
+      geometry -- skipped here; see ``moves_from_steps``/``apply_moves``.
+    * Reads baseline geometry via ``store.resolve_step(tid, baseline_step=...)``
+      so version-aware baseline (current version at session lock time) is
+      respected.
+    """
+    touched = {}
+    for s in steps:
+        tid = s.get("template_id")
+        op = s.get("operation")
+        params = s.get("params") or {}
+        feature_id = s.get("feature_id")
+        if not op:
+            raise ValueError(f"step missing operation: {s}")
+        if op.lower() == "move":
+            continue   # 实例级位移：manifest 侧处理（moves_from_steps）
+        if not tid:
+            raise ValueError(f"step missing template_id: {s}")
+
+        # source = current replayed shape if already touched, else baseline
+        if tid in touched:
+            shape = touched[tid]
+        else:
+            step_path = store.resolve_step(
+                tid, baseline_step=os.path.join(cache_dir, "parts", f"{tid}.step"))
+            shape = cad_core.read_shape(step_path)
+
+        if feature_id is not None:
+            feats_json = os.path.join(cache_dir, "features", f"{tid}.json")
+            if not os.path.isfile(feats_json):
+                raise ValueError(f"no feature data for {tid}")
+            with open(feats_json, encoding="utf-8") as f:
+                feats = json.load(f)
+            feat = next((x for x in feats if x.get("id") == feature_id), None)
+            if feat is None:
+                raise ValueError(f"unknown feature_id: {feature_id}")
+            shape = apply_feature_edit(shape, feat, op, params)
+        else:
+            shape = apply_template_edit(shape, op, params)
+        touched[tid] = shape
+    return touched
+
+
+# --------------------------------------------------------------------------
+# M6.5: 草稿内位置调整（move 步骤 · 实例级）
+# move 是第一个实例级操作：几何步骤用 template_id 寻址（改一个模板 =
+# 所有实例同步变），而位置调整针对"这个位置的这一件"，用 node_id 寻址。
+# --------------------------------------------------------------------------
+
+def _find_node(manifest: dict, node_id):
+    stack = [manifest["root"]]
+    while stack:
+        n = stack.pop()
+        if n.get("id") == node_id:
+            return n
+        stack.extend(n.get("children", []))
+    return None
+
+
+def moves_from_steps(steps: list) -> dict:
+    """{node_id: [dx, dy, dz]} —— 每个节点取最后一条 move 步骤的总位移
+    （相对基线，绝对语义：后写覆盖，与几何步骤的"最终形状"语义一致）。
+    前端拖拽时替换同节点的 move 步骤，这里天然收敛为一条。"""
+    out: dict[str, list] = {}
+    for s in steps:
+        if (s.get("operation") or "").lower() != "move":
+            continue
+        nid = s.get("node_id")
+        if not nid:
+            raise ValueError(f"move step missing node_id: {s}")
+        p = s.get("params") or {}
+        out[nid] = [float(p.get("dx", 0)), float(p.get("dy", 0)),
+                    float(p.get("dz", 0))]
+    return out
+
+
+def apply_moves(manifest: dict, moves: dict) -> dict:
+    """Deep-copy manifest，把 {node_id: [dx,dy,dz]} 世界系位移应用到
+    part 节点累积世界矩阵的平移列（manifest 矩阵已是世界系，直接加）。
+
+    未知 node_id / 非零件节点直接 ValueError：此前静默跳过会让
+    check_interference 的增量候选集为空，退化成全量 O(n²) 布尔检查
+    （62 模板实测 5 分钟），且草稿 manifest 实际没有移动任何东西。"""
+    import copy
+    out = copy.deepcopy(manifest)
+    applied = set()
+    stack = [out["root"]]
+    while stack:
+        n = stack.pop()
+        d = moves.get(n.get("id"))
+        if d is not None:
+            if n.get("type") != "part":
+                raise ValueError(
+                    f"move 目标不是零件节点: {n.get('id')}"
+                    f"（type={n.get('type')}，move 仅支持 part）")
+            applied.add(n["id"])
+            m = n.get("matrix")
+            if not m:
+                m = n["matrix"] = [[1.0, 0.0, 0.0, 0.0],
+                                   [0.0, 1.0, 0.0, 0.0],
+                                   [0.0, 0.0, 1.0, 0.0]]
+            m[0][3] += d[0]
+            m[1][3] += d[1]
+            m[2][3] += d[2]
+        stack.extend(n.get("children", []))
+    unknown = set(moves) - applied
+    if unknown:
+        raise ValueError(
+            f"move 步骤引用了不存在的 node_id: {sorted(unknown)}"
+            f"（node_id 是装配树节点 id 如 'n2'，不是 STEP 名 'NAUO66'）")
+    return out
+
+
+def draft_step_title(step: dict, manifest: dict) -> str:
+    """Deterministic human-readable title for a draft step (used by the
+    frontend and the eventual batch changelog)."""
+    op = step.get("operation", "?")
+    params = step.get("params") or {}
+    if op.lower() == "move":
+        nid = step.get("node_id", "?")
+        node = _find_node(manifest, nid)
+        name = node.get("name", nid) if node else nid
+        return (f"{name}: move Δ({params.get('dx', 0)},"
+                f"{params.get('dy', 0)},{params.get('dz', 0)}) mm")
+    tid = step.get("template_id", "?")
+    tpl = next((t for t in manifest.get("templates", []) if t["id"] == tid), None)
+    tpl_name = tpl.get("name", tid) if tpl else tid
+    op = step.get("operation", "?")
+    params = step.get("params") or {}
+    fid = step.get("feature_id")
+    if fid:
+        return f"{tpl_name} {fid}: {op} " + ", ".join(f"{k}={v}" for k, v in params.items())
+    return f"{tpl_name}: {op} " + ", ".join(f"{k}={v}" for k, v in params.items())
+
+
+def template_instance_counts(manifest: dict) -> dict:
+    """{template_id: 实例数}（遍历装配树统计 part 节点）。"""
+    counts: dict[str, int] = {}
+    stack = [manifest["root"]]
+    while stack:
+        n = stack.pop()
+        if n.get("type") == "part" and n.get("template"):
+            counts[n["template"]] = counts.get(n["template"], 0) + 1
+        stack.extend(n.get("children", []))
+    return counts
+
+
+def draft_diff(manifest: dict, baseline_shapes: dict,
+               edited_shapes: dict) -> dict:
+    """基线 vs 草稿的几何差异摘要（M5，确定性数值，D8）。
+
+    每个被编辑模板：体积/表面积 基线值、草稿值、增量；总计按实例数
+    加权（模板去重模型下，改一个模板 = 其全部实例同步变化）。
+    """
+    counts = template_instance_counts(manifest)
+    per_template = []
+    tot_base_v = tot_draft_v = tot_base_a = tot_draft_a = 0.0
+    for tid, new_shape in sorted(edited_shapes.items()):
+        tpl = next((t for t in manifest.get("templates", [])
+                    if t["id"] == tid), None)
+        base_shape = baseline_shapes.get(tid)
+        n = counts.get(tid, 1)
+        base_p = cad_core.properties(base_shape) if base_shape is not None else {}
+        new_p = cad_core.properties(new_shape)
+        bv, dv = base_p.get("volume", 0.0), new_p.get("volume", 0.0)
+        ba, da = base_p.get("surface_area", 0.0), new_p.get("surface_area", 0.0)
+        tot_base_v += bv * n; tot_draft_v += dv * n
+        tot_base_a += ba * n; tot_draft_a += da * n
+        per_template.append({
+            "template_id": tid,
+            "name": tpl.get("name", tid) if tpl else tid,
+            "instances": n,
+            "baseline_volume_mm3": round(bv, 3),
+            "draft_volume_mm3": round(dv, 3),
+            "delta_volume_mm3": round(dv - bv, 3),
+            "volume_pct": round((dv - bv) / bv * 100, 2) if bv else None,
+            "baseline_area_mm2": round(ba, 3),
+            "draft_area_mm2": round(da, 3),
+            "delta_area_mm2": round(da - ba, 3),
+        })
+    return {
+        "per_template": per_template,
+        "totals": {
+            "baseline_volume_mm3": round(tot_base_v, 3),
+            "draft_volume_mm3": round(tot_draft_v, 3),
+            "delta_volume_mm3": round(tot_draft_v - tot_base_v, 3),
+            "volume_pct": round((tot_draft_v - tot_base_v) / tot_base_v * 100, 2)
+                          if tot_base_v else None,
+            "baseline_area_mm2": round(tot_base_a, 3),
+            "draft_area_mm2": round(tot_draft_a, 3),
+            "delta_area_mm2": round(tot_draft_a - tot_base_a, 3),
+        },
+    }
+
+
+# --------------------------------------------------------------------------
+# 模板形状进程级缓存：preview/confirm 每次都要全模板形状做干涉检查，
+# STEP 导入是大头（62 模板 ~7s）。按 (path, mtime, size) 缓存后热路径
+# 归零，move 级琐碎编辑的 preview 从 ~13s 降到 ~1s。
+# 缓存 shape 只在只读路径共享（OCP 编辑操作均返回新 shape 不改输入）；
+# 文件变化（版本 commit 覆盖）由 mtime 失效。
+# --------------------------------------------------------------------------
+_SHAPE_CACHE: dict = {}           # path -> ((mtime, size), shape)
+_SHAPE_CACHE_LOCK = threading.Lock()
+_SHAPE_CACHE_MAX = 256
+
+
+def _read_cached_shape(path: str):
+    st = os.stat(path)
+    key = (st.st_mtime, st.st_size)
+    with _SHAPE_CACHE_LOCK:
+        hit = _SHAPE_CACHE.get(path)
+        if hit and hit[0] == key:
+            return hit[1]
+    shape = cad_core.read_shape(path)
+    with _SHAPE_CACHE_LOCK:
+        if len(_SHAPE_CACHE) >= _SHAPE_CACHE_MAX:
+            _SHAPE_CACHE.pop(next(iter(_SHAPE_CACHE)))   # FIFO 淘汰
+        _SHAPE_CACHE[path] = (key, shape)
+    return shape
+
+
+# 本地 bbox 缓存（shape 作 key 并持有引用）：check_interference 里
+# world bbox = 本地 bbox 8 角点 × 实例矩阵（纯数学）。BRepBndLib 只对
+# 每个不同 shape 跑一次；同一模板的多个实例共享。
+_LOCAL_BBOX_CACHE: dict = {}
+_LOCAL_BBOX_LOCK = threading.Lock()
+_LOCAL_BBOX_MAX = 256
+
+
+def _local_bbox_cached(shape):
+    with _LOCAL_BBOX_LOCK:
+        b = _LOCAL_BBOX_CACHE.get(shape)
+        if b is not None:
+            return b
+    from OCP.BRepBndLib import BRepBndLib
+    from OCP.Bnd import Bnd_Box
+    box = Bnd_Box()
+    box.SetGap(0.0)
+    BRepBndLib.Add_s(shape, box)
+    try:
+        b = box.Get()
+    except TypeError:
+        pmin, pmax = box.Get()
+        b = (pmin.X(), pmin.Y(), pmin.Z(), pmax.X(), pmax.Y(), pmax.Z())
+    with _LOCAL_BBOX_LOCK:
+        if len(_LOCAL_BBOX_CACHE) >= _LOCAL_BBOX_MAX:
+            _LOCAL_BBOX_CACHE.pop(next(iter(_LOCAL_BBOX_CACHE)))
+        _LOCAL_BBOX_CACHE[shape] = b
+    return b
+
+
 def template_shapes_from_cache(cache_dir: str, manifest: dict) -> dict:
-    """Load B-rep shapes for every template from cache parts/tN.step."""
+    """Load B-rep shapes for every template from cache parts/tN.step.
+
+    走 _read_cached_shape（按 path+mtime 进程级缓存）：STEP 导入是
+    OCP 重活（62 模板 ~7s），而两次 preview 之间未编辑模板的几何
+    根本没变。缓存的 shape 是只读共享对象——check_interference
+    等只读路径直接用；replay_draft_shapes 的可编辑基线另行直读，
+    防止未来出现原地修改几何的操作污染缓存。"""
     shapes = {}
     for t in manifest["templates"]:
         p = os.path.join(cache_dir, "parts", f"{t['id']}.step")
         if os.path.isfile(p):
-            shapes[t["id"]] = cad_core.read_shape(p)
+            shapes[t["id"]] = _read_cached_shape(p)
     return shapes
 
 

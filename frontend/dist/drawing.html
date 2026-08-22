@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>CAD Copilot · 图纸对照</title>
+    <script type="module" crossorigin src="/app/assets/drawing-DlywINHy.js"></script>
+    <link rel="modulepreload" crossorigin href="/app/assets/utils-BgfXieBA.js">
+    <link rel="stylesheet" crossorigin href="/app/assets/utils-DMZNZ1J2.css">
+  </head>
+  <body>
+    <div id="app" class="page-drawing">
+      <header class="sess-bar">
+        <button id="nav-home" class="sess-btn ghost" title="回首页">← 首页</button>
+        <div class="sess-title"><b>图纸对照</b> <span class="sess-meta">DXF / DWG → 语义 + SVG 视图</span></div>
+        <div class="sess-spacer"></div>
+        <div id="drawing-status" class="sess-status">等待加载</div>
+        <button id="drawing-browse" class="sess-btn primary">浏览文件…</button>
+        <input id="drawing-file-input" type="file" accept=".dxf,.dwg" hidden />
+      </header>
+      <div id="drawing-card" class="drawing-main">
+        <div id="drawing-split">
+          <div id="drawing-view"></div>
+          <div id="drawing-semantics"></div>
+        </div>
+        <div id="drawing-msg" class="drawing-summary">浏览或拖入 DXF / DWG 文件以加载</div>
+      </div>
+    </div>
+    <div id="drop-overlay" class="hidden">
+      <div class="drop-msg">松开以加载图纸（DXF / DWG）</div>
+    </div>
+  </body>
+</html>

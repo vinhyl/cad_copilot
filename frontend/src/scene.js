@@ -38,6 +38,9 @@ export class AssemblyScene {
     this.camera = new THREE.PerspectiveCamera(50, 1, 0.01, 100000);
     this.camera.position.set(60, 40, 60);
     this.controls = new OrbitControls(this.camera, this.renderer.domElement);
+    this.controls.addEventListener('change', () => {
+      if (this.cameraChangeCb) this.cameraChangeCb();
+    });
 
     this.scene.add(new THREE.HemisphereLight(0xffffff, 0x3a3a44, 1.1));
     const dir = new THREE.DirectionalLight(0xffffff, 1.4);
@@ -80,6 +83,7 @@ export class AssemblyScene {
     this._lastProxyPos = new THREE.Vector3();
     this.moveControls.addEventListener('dragging-changed', (e) => {
       this.controls.enabled = !e.value;
+      if (!e.value && this.moveEndCb) this.moveEndCb();   // 松手：草稿 move 步骤入口
     });
     this.moveControls.addEventListener('objectChange', () => {
       const delta = this.moveProxy.position.clone().sub(this._lastProxyPos);
@@ -106,6 +110,9 @@ export class AssemblyScene {
   onPick(cb) { this.pickHandler = cb; }
 
   async load(manifest, baseUrl) {
+    // 重载同一装配（preview 刷新 / 放弃草稿回基线）时保留用户相机，
+    // 只有首次加载才自动取景——否则每次刷新都把视角拽回全景
+    const prevCam = this.instances.size > 0 ? this.getCameraState() : null;
     this._clear();
     const loader = new GLTFLoader();
     this.baseUrl = baseUrl;
@@ -179,7 +186,8 @@ export class AssemblyScene {
       const tb = this.templateBoxes.get(inst.mesh.userData.templateId);
       if (tb) this.bbox.union(tb.clone().applyMatrix4(inst.base));
     }
-    this._fitCamera();
+    if (prevCam) this.setCameraState(prevCam);
+    else this._fitCamera();
     return this.instances.size;
   }
 
@@ -221,16 +229,62 @@ export class AssemblyScene {
     }
   }
 
-  /** Z 轴剖切面：on=false 关闭；pos 为世界 Z 高度。 */
-  setSection(on, pos) {
+  /** 剖切面（M6.5 三轴扩展）：on=false 关闭。
+   * axis ∈ 'X'|'Y'|'Z'（默认 Z，向后兼容）；pos 为该轴世界坐标；
+   * flip=true 保留另一侧。默认保留轴向低值一侧。 */
+  setSection(on, pos, axis = 'Z', flip = false) {
     for (const mesh of this.group.children) {
       const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
       mats.forEach((m) => { m.clippingPlanes = on ? [this.sectionPlane] : null; m.needsUpdate = true; });
     }
     if (on && typeof pos === 'number') {
-      // normal (0,0,-1)：保留 z < pos 一侧
-      this.sectionPlane.constant = pos;
+      const v = { X: [1, 0, 0], Y: [0, 1, 0], Z: [0, 0, 1] }[axis] || [0, 0, 1];
+      const s = flip ? -1 : 1;
+      this.sectionPlane.normal.set(s * v[0], s * v[1], s * v[2]);
+      this.sectionPlane.constant = -s * pos;
     }
+  }
+
+  /** 相机变更回调（OrbitControls change）：双视口联动的传播通道。 */
+  onCameraChange(cb) { this.cameraChangeCb = cb; }
+
+  /** 把相机取景到给定零件集合的包围盒（范围切换自动取景）。
+   * ids 为 null 时对整体 bbox 取景（等价首次加载）。 */
+  fitToIds(ids) {
+    const box = new THREE.Box3();
+    if (!ids) {
+      if (!this.bbox.isEmpty()) box.copy(this.bbox);
+    } else {
+      for (const id of ids) {
+        const inst = this.instances.get(id);
+        if (!inst || !inst.visible) continue;
+        const tb = this.templateBoxes.get(inst.mesh.userData.templateId);
+        if (!tb) continue;
+        // 与 _updateMatrices 同公式：base × (爆炸 + temp 平移)
+        const acc = this.accExplode.get(id) || [0, 0, 0];
+        const m = new THREE.Matrix4().makeTranslation(
+          acc[0] * this.explodeRatio + inst.temp[0],
+          acc[1] * this.explodeRatio + inst.temp[1],
+          acc[2] * this.explodeRatio + inst.temp[2],
+        ).multiply(inst.base);
+        box.union(tb.clone().applyMatrix4(m));
+      }
+    }
+    if (box.isEmpty()) return;
+    this._fitCameraTo(box);
+  }
+
+  /** 移动结束回调（TransformControls 拖拽松开）：草稿 move 步骤的入口。 */
+  onMoveEnd(cb) { this.moveEndCb = cb; }
+
+  /** 当前全部临时位移 {nodeId: [dx,dy,dz]}（temp 非零者）。 */
+  getTempMoves() {
+    const out = {};
+    for (const [id, inst] of this.instances) {
+      const [x, y, z] = inst.temp;
+      if (x || y || z) out[id] = [x, y, z];
+    }
+    return out;
   }
 
   /** 临时拖拽移动：绑定 gizmo 到给定 part 节点集合（选择层级原则——
@@ -274,38 +328,93 @@ export class AssemblyScene {
     return inst ? inst.mesh.userData.templateId : null;
   }
 
+  /** 特征 glTF 模板级缓存（promise；失败清除条目允许重试）。 */
+  _featureGltf(tid) {
+    let load = this.featureGltfCache.get(tid);
+    if (load) return load;
+    const tpl = this.manifest.templates.find((t) => t.id === tid);
+    if (!tpl?.features) return null;
+    load = (async () => {
+      const loader = new GLTFLoader();
+      const [gltf, feats] = await Promise.all([
+        loader.loadAsync(`${this.baseUrl}/${tpl.features.replace('.json', '.gltf')}`),
+        fetch(`${this.baseUrl}/${tpl.features}`)
+          .then((r) => (r.ok ? r.json() : []))
+          .catch(() => []),
+      ]);
+      // 固化矩阵：节点不挂渲染场景，pickFeatureAt 直接 raycast 需要 matrixWorld
+      gltf.scene.updateMatrixWorld(true);
+      // GLTFLoader 命名节点时经 PropertyBinding.sanitizeNodeName 处理
+      //（删除 . : / [ ]，空格→下划线，如 "#1.1" → "#11"），与特征 JSON
+      // 的 id 不再一致——同步取特征 JSON 建立 sanitize 名 → 原始 id 的
+      // 映射，nodes 直接以原始特征 id 为 key（高亮/拾取两侧都还原）。
+      // 另注意多 primitive 特征会被展开成 Group(原名) + Mesh(原名_N) 子
+      // 节点——按顶层节点收集，拾取沿父链回溯到顶层。
+      const sanitize = (s) => s.replace(/\s/g, '_').replace(/[[\].:/]/g, '');
+      const origBySan = new Map();   // sanitize 名 -> 原始特征 id
+      for (const f of Array.isArray(feats) ? feats : []) {
+        origBySan.set(sanitize(f.id), f.id);
+      }
+      const nodes = new Map();       // 原始特征 id -> Object3D
+      for (const child of gltf.scene.children) {
+        const orig = origBySan.get(child.name);
+        if (orig) nodes.set(orig, child);
+      }
+      return { nodes, origBySan };
+    })();
+    load.catch(() => { if (this.featureGltfCache.get(tid) === load) this.featureGltfCache.delete(tid); });
+    this.featureGltfCache.set(tid, load);
+    return load;
+  }
+
+  /** 预载模板特征 glTF（特征粒度激活时调用，为 3D 特征拾取联动做准备）。 */
+  preloadFeaturesByTemplate(tid) { this._featureGltf(tid); }
+
+  /** 特征级拾取：在指定零件上拾取点击处的特征 id（特征粒度编辑的
+   *  3D → 列表联动）。返回特征 id 或 null（未命中 / glTF 不可用）。 */
+  async pickFeatureAt(ndc, partId) {
+    if (!ndc || !partId) return null;
+    const tid = this.templateOf(partId);
+    const load = tid ? this._featureGltf(tid) : null;
+    if (!load) return null;
+    const { nodes, origBySan } = await load;
+    const inst = this.instances.get(partId);
+    if (!inst || !nodes.size) return null;
+    // 特征 glTF 是模板局部坐标：把世界射线逆变换到局部空间再求交
+    const m = new THREE.Matrix4();
+    inst.mesh.getMatrixAt(inst.index, m);
+    const raycaster = new THREE.Raycaster();
+    raycaster.setFromCamera(ndc, this.camera);
+    raycaster.ray.applyMatrix4(m.clone().invert());
+    // 递归检测：多 primitive 特征节点是 Group，非递归永远打不中
+    const hits = raycaster.intersectObjects([...nodes.values()], true);
+    if (!hits.length) return null;
+    // 沿父链回溯到特征顶层节点，再经 sanitize 名映射回原始特征 id
+    let o = hits[0].object;
+    while (o && !origBySan.has(o.name)) o = o.parent;
+    return o ? origBySan.get(o.name) : null;
+  }
+
   /** 特征拾取 overlay：加载模板 features glTF，高亮指定特征。
    *  featureId 为 null 时清除 overlay。返回 false 表示特征不可用。 */
   async showFeature(partId, featureId) {
     if (!partId || featureId == null) { this._clearOverlay(); return true; }
     const tid = this.templateOf(partId);
-    const tpl = this.manifest.templates.find((t) => t.id === tid);
-    if (!tid || !tpl?.features) { this._clearOverlay(); return false; }
-
-    let cache = this.featureGltfCache.get(tid);
-    if (!cache) {
-      // 缓存加载 promise（非结果）：连点同一特征不会触发重复/被中止的请求；
-      // 失败时清除缓存条目，允许下次重试（避免会话内永久失效）
-      const load = (async () => {
-        const loader = new GLTFLoader();
-        const gltf = await loader.loadAsync(
-          `${this.baseUrl}/${tpl.features.replace('.json', '.gltf')}`);
-        const nodes = new Map();
-        gltf.scene.traverse((o) => { if (o.isMesh && o.name) nodes.set(o.name, o); });
-        return { nodes };
-      })();
-      load.catch(() => { if (this.featureGltfCache.get(tid) === load) this.featureGltfCache.delete(tid); });
-      this.featureGltfCache.set(tid, load);
-      cache = load;
+    if (!tid || !this.manifest.templates.find((t) => t.id === tid)?.features) {
+      this._clearOverlay(); return false;
     }
-    cache = await cache;
-    const src = cache.nodes.get(featureId);
+    const cache = await this._featureGltf(tid);
+    const src = cache?.nodes.get(featureId);
     if (!src) { this._clearOverlay(); return false; }
 
     this._clearOverlay();
+    // overlay 与零件表面共面（后端同一套三角化导出）：深度完全相等，
+    // 靠 polygonOffset 在深度测试中稳定胜出，避免 Z-fighting 条纹。
     const mat = new THREE.MeshStandardMaterial({
       color: new THREE.Color(0xff8a3d), emissive: new THREE.Color(0x662200),
       transparent: true, opacity: 0.9, side: THREE.DoubleSide,
+      depthTest: true,
+      polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -2,
     });
     const holder = new THREE.Group();
     holder.name = '__feature__';
@@ -422,8 +531,13 @@ export class AssemblyScene {
 
   _fitCamera() {
     if (this.bbox.isEmpty()) return;
-    const center = this.bbox.getCenter(new THREE.Vector3());
-    const size = this.bbox.getSize(new THREE.Vector3());
+    this._fitCameraTo(this.bbox);
+  }
+
+  /** 取景到显式包围盒（fitToIds / _fitCamera 共用）。 */
+  _fitCameraTo(box) {
+    const center = box.getCenter(new THREE.Vector3());
+    const size = box.getSize(new THREE.Vector3());
     const maxDim = Math.max(size.x, size.y, size.z) || 1;
     const dir = this.camera.position.clone().sub(this.controls.target).normalize();
     if (dir.lengthSq() < 1e-9) dir.set(1, 0.7, 1).normalize();
@@ -455,7 +569,8 @@ export class AssemblyScene {
       if (hits.length && this.pickHandler) {
         const h = hits[0];
         const nodeId = h.object.userData.nodeIds?.[h.instanceId];
-        if (nodeId) this.pickHandler(nodeId);
+        // ndc 一并传出：特征级拾取（pickFeatureAt）需要点击位置
+        if (nodeId) this.pickHandler(nodeId, ndc.clone());
       }
     });
   }
@@ -463,7 +578,11 @@ export class AssemblyScene {
   _resize() {
     const w = this.container.clientWidth || 1;
     const h = this.container.clientHeight || 1;
-    this.renderer.setSize(w, h, false);
+    // setSize 默认把 CSS 尺寸写进 style：dpr>1（视网膜屏）时 canvas
+    // 画布为 w*dpr 物理像素、显示尺寸仍为 w。此前传 false 不写 style，
+    // canvas 会以 w*dpr 的原始尺寸撑破容器（首页 2x 溢出；编辑页
+    // 网格最小内容尺寸反馈放大直至浏览器上限，视口全黑只剩提示）。
+    this.renderer.setSize(w, h);
     this.camera.aspect = w / h;
     this.camera.updateProjectionMatrix();
   }
