@@ -1189,7 +1189,25 @@ html, body {
 .mini-tree { display: none; }
 
 /* ---------- 图纸对照独立页 ---------- */
-.page-drawing { flex-direction: column; }
+.page-drawing {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+}
+/* 图纸对照已是独立整页，不再用 860×640 卡片样式，让内容占满视口宽度
+   （否则卡片左对齐、右侧留白，与占满宽的顶栏不一致） */
+.page-drawing #drawing-card {
+  width: 100%;
+  height: auto;
+  flex: 1;                 /* 占满 #app 纵向剩余空间，图纸窗口不再被 640px 限制 */
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  max-width: none;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+}
 .drawing-main {
   flex: 1; display: flex; flex-direction: column;
   min-height: 0; padding: 12px;
@@ -1202,9 +1220,12 @@ html, body {
 }
 .drawing-main #drawing-view {
   flex: 2; min-width: 0; background: #141418;
-  overflow: auto; display: flex; align-items: center; justify-content: center;
+  overflow: hidden; position: relative;
 }
-.drawing-main #drawing-view svg { max-width: 100%; max-height: 100%; }
+.drawing-main #drawing-view svg {
+  width: 100%;
+  height: 100%;
+}
 .drawing-main #drawing-semantics {
   flex: 1; min-width: 0;
   border-left: 1px solid #2c2c33;
@@ -1212,9 +1233,87 @@ html, body {
   display: flex; flex-direction: column; gap: 2px;
 }
 .drawing-summary {
-  margin-top: 8px; font-size: 12px; color: #a0a0aa;
-  padding: 6px 10px; background: #26262e;
+  position: absolute;
+  left: 12px; right: 12px; bottom: 12px;
+  z-index: 4;
+  font-size: 12px; color: #a0a0aa;
+  padding: 6px 10px; background: rgba(38, 38, 46, 0.92);
   border: 1px solid #33333c; border-radius: 6px;
+  pointer-events: none; /* 不阻挡画布拖拽 */
+}
+
+/* 图纸交互画布 */
+.drw-canvas {
+  position: absolute; inset: 0; overflow: hidden;
+  touch-action: none;
+  cursor: crosshair;            /* 默认 CAD 风格十字线，不显示"手型" */
+}
+.drw-canvas.grab   { cursor: crosshair; }
+.drw-canvas.grabbing { cursor: grabbing; }   /* 仅拖拽中显示抓取态 */
+/* 注意：不要给 #drw-g 常驻 will-change/contain —— 8 万节点永久驻留 GPU 合成层
+   反而让每次提交(viewBox 变更)更慢。仅交互期临时提升由浏览器自行决定。 */
+/* 交互期（拖拽/缩放/滑条）临时跳过整图命中测试，避免 8 万级节点命中开销 */
+#drw-g.pe-none { pointer-events: none; }
+#drw-g text { fill: #dfe3ea; cursor: text; }  /* 悬停文字显示文本选择竖条，直观区分"可选文字"与"可拖画布" */
+#drw-g > * { shape-rendering: geometricPrecision; }
+/* 拖拽画布时临时禁用文本选择；pointerup 后移除，平时允许选择文字 */
+.drw-canvas.no-select, .drw-canvas.no-select * {
+  user-select: none !important;
+  -webkit-user-select: none !important;
+}
+/* CAD 发丝线：缩放不改变线宽（vector-effect），放大后细节不被变粗的
+   描边吞掉；此前描边随 viewBox 同步放大，放大 2 倍线宽也翻倍 */
+#drw-g :is(path, line, circle, polyline, polygon, rect) {
+  vector-effect: non-scaling-stroke;
+  stroke-width: 1px;
+}
+.fp-row.sem-more { color: #7a7a88; font-size: 12px; }
+
+.drw-toolbar {
+  position: absolute; top: 10px; left: 10px; z-index: 5;
+  display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 6px;
+  max-width: calc(100% - 20px);
+  background: rgba(30, 30, 35, 0.85);
+  border: 1px solid #33333c; border-radius: 10px;
+  backdrop-filter: blur(4px);
+}
+.drw-toolbar .sess-btn {
+  font-size: 12px; padding: 4px 9px; line-height: 1.2;
+}
+.drw-toolbar.win { outline: 2px solid #4f8cff; }
+/* 逻辑分组之间的分隔线 */
+.drw-sep { width: 1px; align-self: stretch; margin: 2px 2px; background: #3a3a44; }
+.drw-zoom-slider {
+  align-self: center; width: 220px; height: 4px; cursor: pointer;
+  accent-color: #4f8cff; background: transparent;
+}
+.drw-zoom-pct {
+  align-self: center; min-width: 46px; text-align: center;
+  font: 12px/1.2 ui-monospace, Menlo, Consolas, monospace;
+  color: #cdd3df; background: rgba(20, 20, 24, 0.6);
+  padding: 3px 6px; border-radius: 6px; border: 1px solid #33333c;
+}
+.drw-canvas.crosshair { cursor: crosshair; }
+/* 收起右侧信息面板，图纸视图占满全宽 */
+.drawing-main #drawing-split.panel-collapsed #drawing-semantics { display: none; }
+.drawing-main #drawing-split.panel-collapsed #drawing-view { flex: 1; }
+/* 框选放大覆盖层 */
+.drw-selrect {
+  position: absolute; z-index: 6; pointer-events: none;
+  border: 1px solid #4f8cff; background: rgba(79, 140, 255, 0.15);
+}
+
+/* 信息面板概览 */
+.drw-overview {
+  border-bottom: 1px solid #2c2c33; padding-bottom: 8px; margin-bottom: 6px;
+  display: flex; flex-direction: column; gap: 4px;
+}
+.drw-overview-row { align-items: flex-start; }
+.drw-overview-row .fp-name { white-space: normal; }
+.drw-layer-chips { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+.drw-layer-chip {
+  font-size: 11px; color: #8fd0ff; background: #1f2b38;
+  border: 1px solid #2c4658; border-radius: 4px; padding: 1px 6px;
 }
 
 /* 窄屏图纸：语义栏移到底部 */

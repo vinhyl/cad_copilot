@@ -199,9 +199,9 @@ export async function getReport(cacheKey, reportId) {
   return body;
 }
 
-/** D5 图纸导入：DXF 原生 / DWG 经 ODA → 语义 + SVG 缓存。 */
-export async function importDrawing(inputPath) {
-  return _post('/api/drawing/import', { input_path: inputPath });
+/** D5 图纸导入：DXF 原生 / DWG 经 ODA → 语义 + SVG 缓存。force=1 强制重建。 */
+export async function importDrawing(inputPath, force = false) {
+  return _post('/api/drawing/import', { input_path: inputPath, force: !!force });
 }
 
 /** D5/D7 插件探测：ODA / FreeCAD+CalculiX / Blender 可用性。 */

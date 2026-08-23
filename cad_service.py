@@ -180,7 +180,10 @@ def create_app(token: str | None = None,
             CAD_SERVICE_FRONTEND_DIR env or ./frontend/dist. Missing dir ->
             /app returns 503 with a hint (run npm run build).
     """
-    token = token or os.environ.get("CAD_SERVICE_TOKEN") or secrets.token_urlsafe(24)
+    # 固定默认 token，保证任何启动方式（含直接 `python cad_service.py`）产出的
+    # token 都与文档/agent 使用的 `cad-local-dev-2026` 一致，避免 LLM 用随机 token
+    # 拼 URL 导致鉴权失败。可用 CAD_SERVICE_TOKEN 环境变量覆盖。
+    token = token or os.environ.get("CAD_SERVICE_TOKEN") or "cad-local-dev-2026"
     allowed_dirs = allowed_dirs or [
         os.path.abspath(p)
         for p in os.environ.get("CAD_SERVICE_ALLOWED_DIRS", ".").split(os.pathsep)
@@ -1468,15 +1471,36 @@ def create_app(token: str | None = None,
             return JSONResponse({"error": f"bad request: {e}"}, status_code=400)
 
         import hashlib
-        sha = hashlib.sha256()
-        with open(src, "rb") as f:
-            for chunk in iter(lambda: f.read(1 << 16), b""):
-                sha.update(chunk)
+        try:
+            sha = hashlib.sha256()
+            with open(src, "rb") as f:
+                for chunk in iter(lambda: f.read(1 << 16), b""):
+                    sha.update(chunk)
+        except FileNotFoundError:
+            return JSONResponse({"error": f"文件不存在: {src}"}, status_code=400)
         key = sha.hexdigest()[:16]
         out_dir = os.path.join(drawings_root, key)
 
+        # force=1：忽略已有缓存，删除后重建（便于确认重新导入/新的渲染逻辑生效）
+        force = bool(body.get("force"))
+        if force and os.path.isdir(out_dir):
+            for fn in ("drawing.json", "view.svg", "dwg_converted.dxf"):
+                p = os.path.join(out_dir, fn)
+                if os.path.isfile(p):
+                    os.remove(p)
+
         import cad_drawing
-        cached = os.path.isfile(os.path.join(out_dir, "drawing.json"))
+        # 缓存命中 = drawing.json 存在且 schema 版本与当前渲染逻辑一致；
+        # 渲染逻辑升级后旧缓存自动重建，避免"缓存命中但 SVG 是旧逻辑"的困惑
+        cached = False
+        dj = os.path.join(out_dir, "drawing.json")
+        if os.path.isfile(dj):
+            try:
+                with open(dj, encoding="utf-8") as f:
+                    cached = (json.load(f).get("schema_version")
+                              == cad_drawing.DRAWING_SCHEMA_VERSION)
+            except Exception:  # noqa: BLE001
+                cached = False
         if not cached:
             try:
                 def work():

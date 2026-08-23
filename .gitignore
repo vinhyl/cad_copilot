@@ -39,6 +39,9 @@ mcp_test.py
 # ---- Agent working memory (not project docs) ----
 .workbuddy/
 
+# ---- Trae IDE local state ----
+.trae/
+
 # ---- Frontend ----
 node_modules/
 !frontend/index.html

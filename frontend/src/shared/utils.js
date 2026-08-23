@@ -217,17 +217,27 @@ export function pushRecent(path, kind) {
 // ---------- 拖放覆盖层 ----------
 export function bindDropOverlay(overlayEl, onFile) {
   let dragDepth = 0;
+  // 仅当拖入的是真实文件（系统拖文件进浏览器）才显示覆盖层。
+  // 内部元素/文本拖拽（dragenter 不带 Files 类型）一律忽略，避免
+  // 拖动画布时误触发"松开以加载文件"提示。
+  const isFileDrag = (e) =>
+    !!e.dataTransfer && Array.from(e.dataTransfer.types || []).includes('Files');
   window.addEventListener('dragenter', (e) => {
+    if (!isFileDrag(e)) return;
     e.preventDefault();
     dragDepth += 1;
     overlayEl?.classList.remove('hidden');
   });
-  window.addEventListener('dragover', (e) => e.preventDefault());
+  window.addEventListener('dragover', (e) => {
+    if (!isFileDrag(e)) return;
+    e.preventDefault();
+  });
   window.addEventListener('dragleave', () => {
     dragDepth = Math.max(0, dragDepth - 1);
     if (!dragDepth) overlayEl?.classList.add('hidden');
   });
   window.addEventListener('drop', (e) => {
+    if (!isFileDrag(e)) return;
     e.preventDefault();
     dragDepth = 0;
     overlayEl?.classList.add('hidden');

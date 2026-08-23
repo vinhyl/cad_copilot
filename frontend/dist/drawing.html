@@ -4,9 +4,9 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>CAD Copilot · 图纸对照</title>
-    <script type="module" crossorigin src="/app/assets/drawing-DlywINHy.js"></script>
-    <link rel="modulepreload" crossorigin href="/app/assets/utils-BgfXieBA.js">
-    <link rel="stylesheet" crossorigin href="/app/assets/utils-DMZNZ1J2.css">
+    <script type="module" crossorigin src="/app/assets/drawing-DbjucMwl.js"></script>
+    <link rel="modulepreload" crossorigin href="/app/assets/utils-DHceTbdw.js">
+    <link rel="stylesheet" crossorigin href="/app/assets/utils-C4g4V-ef.css">
   </head>
   <body>
     <div id="app" class="page-drawing">
@@ -16,14 +16,36 @@
         <div class="sess-spacer"></div>
         <div id="drawing-status" class="sess-status">等待加载</div>
         <button id="drawing-browse" class="sess-btn primary">浏览文件…</button>
+        <label class="force-row" title="忽略图纸缓存键，强制重新解析并重建 SVG">
+          <input type="checkbox" id="drawing-force" /> 强制重建缓存
+        </label>
         <input id="drawing-file-input" type="file" accept=".dxf,.dwg" hidden />
       </header>
       <div id="drawing-card" class="drawing-main">
         <div id="drawing-split">
-          <div id="drawing-view"></div>
+          <div id="drawing-view">
+            <div id="drw-toolbar" class="drw-toolbar">
+              <!-- 视图导航：回到全图 / 框选放大 -->
+              <button id="drw-fit" class="sess-btn" title="适配窗口 (F)">适配</button>
+              <button id="drw-zoom-window" class="sess-btn" title="框选放大：拖出矩形区域放大 (W)">框选</button>
+              <span class="drw-sep"></span>
+              <!-- 缩放控制：缩小 / 滑条 / 读数 / 放大 -->
+              <button id="drw-zoom-out" class="sess-btn" title="缩小 ( − )">－</button>
+              <input id="drw-zoom-slider" class="drw-zoom-slider" type="range"
+                     min="0" max="1000" step="1" value="389"
+                     title="缩放比例（10% – 5000%，对数映射）" aria-label="缩放比例" />
+              <span id="drw-zoom-pct" class="drw-zoom-pct">100%</span>
+              <button id="drw-zoom-in" class="sess-btn" title="放大 ( + )">＋</button>
+              <span class="drw-sep"></span>
+              <!-- 视图模式：信息面板 / 全屏 -->
+              <button id="drw-collapse" class="sess-btn" title="收起/展开右侧信息面板">面板</button>
+              <button id="drw-fullscreen" class="sess-btn" title="全屏查看图纸">全屏</button>
+            </div>
+            <div id="drw-canvas" class="drw-canvas grab"></div>
+            <div id="drawing-msg" class="drawing-summary">浏览或拖入 DXF / DWG 文件以加载</div>
+          </div>
           <div id="drawing-semantics"></div>
         </div>
-        <div id="drawing-msg" class="drawing-summary">浏览或拖入 DXF / DWG 文件以加载</div>
       </div>
     </div>
     <div id="drop-overlay" class="hidden">

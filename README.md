@@ -8,6 +8,34 @@ MCP server 供 agent 以 stdio 调用同一套几何能力（双 transport，共
 交互界面集中在 Web 前端（`/app` 多页应用：首页 / 编辑 / 图纸 / 报告）；agent 经
 会话工具组读写草稿与用户选中上下文，**确认落版本永远留给用户**。
 
+## 🤖 给 Agent / LLM 的操作须知（必读，优先于下面各节）
+
+本服务是**用户与 agent 之间的语义通道**：用户在浏览器点选零件/特征 → agent 精确
+知道要处理哪个对象。凡是"打开 / 预览 / 处理图纸或 STEP"，**必须按下述流程**，
+不要走其它方式（否则服务起不来或 token 错配，用户无感知）。
+
+1. **先探活**：`bash cad_service_ctl.sh status`
+   （等价 `curl -H "Authorization: Bearer cad-local-dev-2026" http://127.0.0.1:8764/api/config`
+   返回 `200` 即在线）
+2. **不在线则启动**：`bash cad_service_ctl.sh start`
+   ⚠️ **必须用「后台任务」方式执行**（工具里的 run_in_background）。脚本内部
+   `exec python cad_service.py`，该后台任务即服务进程本身；用普通命令前台跑会被
+   命令结束杀掉。
+3. **打开页面**：`bash cad_service_ctl.sh open`
+   （macOS 调系统默认浏览器打开；非 macOS 或失败则把下方 URL 给用户）
+4. **固定地址**（token 固定为 `cad-local-dev-2026`，**不要**依赖"启动时随机打印的 token"）：
+   - 图纸对照：`http://127.0.0.1:8764/app/drawing.html?token=cad-local-dev-2026`
+   - 装配预览：`http://127.0.0.1:8764/app/?token=cad-local-dev-2026&load=<encodeURIComponent(绝对路径)>`
+     或 `?cacheKey=<键>`
+
+**禁止**（这些都会导致服务不可用 / token 错配）：
+- ❌ 直接 `python cad_service.py`（前台阻塞或被回收）→ 统一用 `cad_service_ctl.sh start`
+- ❌ 为"打开图纸"去启动 Vite 开发服务器（`npm run dev` / 5173）→ 生产链接 8764 已自带前端，无需 Node
+- ❌ 假设无 token 或用随机 token 拼 URL
+
+**生命周期**：服务随对话会话存活（足够一次交互），长时间不用被回收属正常；用户再次
+要处理时重跑第 1–3 步即可。无需开机自启 / 永久常驻。
+
 ## 环境要求
 - Python 3.13（3.12+ 一般也可，但 OCP 轮子按 3.13 验证；`cadquery-ocp-novtk` / `build123d` 已确认有 cp313 wheel 可用）
 - Windows / macOS / Linux
@@ -55,11 +83,16 @@ https://www.opendesign.com/guestfiles/oda_file_converter 。用户同意后，ag
 全程由 agent 执行，不在对话里暴露终端操作。
 
 ## 快速开始：启动 Web 服务
+
+> **Agent / LLM 请直接看上方「🤖 给 Agent / LLM 的操作须知」**，用 `cad_service_ctl.sh`
+> 探活 / 启动 / 打开，不要手动 `python cad_service.py`。
+
+人工启动（固定 token `cad-local-dev-2026`，无需看启动日志）：
 ```bash
-venv/Scripts/python cad_service.py   # Windows（token 启动时打印）
+venv/Scripts/python cad_service.py   # Windows
 venv/bin/python        cad_service.py   # macOS / Linux
 ```
-浏览器打开 `http://127.0.0.1:8764/app?token=<启动时打印的 token>`——上传/拖入
+浏览器打开 `http://127.0.0.1:8764/app?token=cad-local-dev-2026`——上传/拖入
 STEP 即得 3D 装配视口 + 特征拾取 + 编辑会话（草稿模式）。详见下文「本地 Web
 服务」与「Web 前端」两节。
 
@@ -142,8 +175,9 @@ venv/bin/python        cad_mcp_server.py    # macOS / Linux
 **零新增依赖**），与 MCP server 共享同一套工具库（ADR-0002 D2 双 transport）。
 
 ```bash
-venv/Scripts/python cad_service.py     # http://127.0.0.1:8764（token 启动时打印）
+venv/Scripts/python cad_service.py     # http://127.0.0.1:8764，固定 token cad-local-dev-2026
 ```
+> Agent 请用仓库根的 `cad_service_ctl.sh start`（后台任务方式）拉起，不要手动跑这条命令。
 
 | 端点 | 说明 |
 |---|---|
@@ -274,12 +308,15 @@ DWG 经 ODA（探测降级，缺失时明确提示装 ODA 或转存 DXF）；**�
 M10x1.5 / 直径 Ø8 / 公差 H7/g6，模块六语义真理）+ 轻依赖 SVG 渲染
 （LINE/CIRCLE/ARC/LWPOLYLINE/TEXT，零 PIL 依赖）。
 
-- **使用（零 Node 依赖）**：`venv/Scripts/python cad_service.py` 后浏览器打开
-  `http://127.0.0.1:8764/app/`，token 支持 `?token=...` 一次性注入。构建产物
+- **使用（零 Node 依赖）**：服务起来后浏览器打开
+  `http://127.0.0.1:8764/app/drawing.html?token=cad-local-dev-2026`（图纸对照页）。
+  Agent 用 `bash cad_service_ctl.sh open` 或 `status` / `start` 管理。构建产物
   `frontend/dist/` **随仓库提交**——分发时带走仓库即可离线运行。
 - **开发（需 Node 18+）**：`cd frontend && npm install`，之后 `npm run dev`
   （5173 端口，API/WS 代理到 8764，改源码热更新）；发布前 `npm run build` 并提交
   新的 `dist/`。
+  > 注：5173 仅用于改前端源码热更新；**agent 与用户"打开图纸"一律用 8764 生产链接**，
+  > 无需 Node。
 - token 经 localStorage 保存；`/cache/` 静态文件不设 token（GLTFLoader 无法附带
   请求头）——仅本机监听 + 无 CORS 下可接受（ADR-0002 延续约束一的本地化取舍）。
 
