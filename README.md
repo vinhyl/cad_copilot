@@ -305,8 +305,10 @@ venv/Scripts/python cad_service.py     # http://127.0.0.1:8764，固定 token ca
 
 **图纸对照（D5）**：独立页（drawing.html，首页「图纸」入口跳入）→ DXF 直读 /
 DWG 经 ODA（探测降级，缺失时明确提示装 ODA 或转存 DXF）；**语义提取**（螺纹
-M10x1.5 / 直径 Ø8 / 公差 H7/g6，模块六语义真理）+ 轻依赖 SVG 渲染
-（LINE/CIRCLE/ARC/LWPOLYLINE/TEXT，零 PIL 依赖）。
+M10x1.5 / 直径 Ø8 / 公差 H7/g6，模块六语义真理）+ **零件名语义侧栏**——确定性
+规则滤掉图框栏位 / 技术要求 / 视图名 / 标准件规格等噪声，剩下纯零件名并去重，
+"其它标注"再筛一层无意义噪声（日期 / 页码 / 比例 / 版本等），支持模糊搜索与
+点击定位；+ 轻依赖 SVG 渲染（LINE/CIRCLE/ARC/LWPOLYLINE/TEXT，零 PIL 依赖）。
 
 - **使用（零 Node 依赖）**：服务起来后浏览器打开
   `http://127.0.0.1:8764/app/drawing.html?token=cad-local-dev-2026`（图纸对照页）。
@@ -371,7 +373,7 @@ workspace/
 - `evals/` — 评测基准集（D9）：指令三层标注 + `run_evals.py`（黄金轨迹回放 + 几何断言全自动化；LLM 对比层后续接入）
 - `cad_build.py` — build123d 字体 import-hook（跨平台无害，修复损坏系统字体导致 import 崩溃）
 - `frontend/` — Web 前端多页 MPA（Vite + three.js：首页 / 编辑 / 图纸 / 报告四入口，`pages/` + `shared/` 分层）；`dist/` 构建产物随仓库提交（离线运行无需 Node）
-- `tests/` — pytest 测试套件（Phase 3 建立；Phase A/B/C/D 增装配/服务层/编辑流/图纸用例，当前 **185 个用例全绿**）
+- `tests/` — pytest 测试套件（Phase 3 建立；Phase A/B/C/D 增装配/服务层/编辑流/图纸用例，当前 **192 个用例全绿**）
 - `pytest.ini` — pytest 配置（含 `--cov` 覆盖率）
 - `docs/architecture/copilot-vision.md` — Web Copilot 系统设想（原根目录 `设想.txt` 迁入；文首附与 ADR-0002 的差异摘要）
 - `docs/decisions/0001-ocp-vs-freecad-base.md` — ADR-0001：OCP 轻量底座 vs FreeCAD 方案对比（原 `comparison.md`）

@@ -376,11 +376,46 @@ function mountSvg(svgText) {
 }
 
 // ---------- 信息面板（概览 + 语义） ----------
-const SEM_KIND_LABEL = { thread: '螺纹', diameter: '直径', tolerance: '公差', note: '标注' };
+const SEM_KIND_LABEL = { part_name: '零件', thread: '螺纹', diameter: '直径', tolerance: '公差', note: '标注' };
 const ETYPE_LABEL = {
   LINE: '直线', CIRCLE: '圆', ARC: '圆弧', LWPOLYLINE: '多段线',
   ELLIPSE: '椭圆', SPLINE: '样条', POINT: '点', TEXT: '单行文字', MTEXT: '多行文字',
 };
+
+// 点击零件名 → 定位到该文字在图纸中的世界坐标（放大至能看到零件周边图形）。
+// 语义 position 存的是 CAD 坐标（y 向上）；SVG 渲染统一做了 Y 翻转（y'=-y），
+// viewBox / zoomToWorldRect 都在这套翻转后的坐标里，所以必须先取 -y 再定位。
+// 窗口大小固定按"一整幅图的图幅"（加载时的初始 viewBox state.init）的一定比例算，
+// 而不是按当前视图——否则每次点击都在当前基础上再缩一圈，连点几次会一直累计放大。
+// LOCATE_RATIO：半宽占图幅最大值比例，调大更缩小看全、调小更放大靠近。
+const LOCATE_RATIO = 0.05;
+function locateSemantics(sem) {
+  if (!sem || !Array.isArray(sem.position) || sem.position.length < 2) return;
+  const x = sem.position[0];
+  const y = -sem.position[1];
+  const full = Math.max(state.init[2], state.init[3]) || 1;
+  const half = full * LOCATE_RATIO;
+  zoomToWorldRect([x - half, y - half, x + half, y + half]);
+}
+
+// 渲染一组语义行（共享 DOM 构建逻辑）
+function appendSemRows(container, sems) {
+  sems.forEach((s) => {
+    const row = document.createElement('div'); row.className = 'fp-row';
+    const kind = document.createElement('span'); kind.className = 'sem-kind';
+    kind.textContent = SEM_KIND_LABEL[s.kind] || s.kind;
+    const val = document.createElement('span');
+    val.className = (s.kind === 'part_name') ? 'fp-name drw-part' : 'fp-name';
+    val.textContent = s.text;
+    // 零件名可点击定位到图纸中的对应位置
+    if (s.kind === 'part_name' && Array.isArray(s.position)) {
+      row.classList.add('drw-part-row');
+      row.addEventListener('click', () => locateSemantics(s));
+    }
+    row.append(kind, val);
+    container.append(row);
+  });
+}
 
 function renderOverview(res) {
   const sem = $('#drawing-semantics');
@@ -420,23 +455,71 @@ function renderOverview(res) {
   }
   sem.append(wrap);
 
-  // 大图纸可有数千条语义（全套图纸所有文字标注），全量渲染拖垮信息面板
+  // 语义分两组：零件名（去重、置顶） + 其它标注。
+  // 顶部提供模糊搜索框，按 q 实时过滤两组行（不区分大小写、子串匹配）。
   const sems = res.semantics || [];
-  const MAX_SEM_ROWS = 120;
-  sems.slice(0, MAX_SEM_ROWS).forEach((s) => {
-    const row = document.createElement('div'); row.className = 'fp-row';
-    const kind = document.createElement('span'); kind.className = 'sem-kind';
-    kind.textContent = SEM_KIND_LABEL[s.kind] || s.kind;
-    const val = document.createElement('span'); val.className = 'fp-name'; val.textContent = s.text;
-    row.append(kind, val);
-    sem.append(row);
+  const seen = new Set();
+  const partNames = sems.filter((s) => {
+    if (s.kind !== 'part_name') return false;
+    if (seen.has(s.text)) return false;
+    seen.add(s.text);
+    return true;
   });
-  if (sems.length > MAX_SEM_ROWS) {
-    const more = document.createElement('div');
-    more.className = 'fp-row sem-more';
-    more.textContent = `… 其余 ${sems.length - MAX_SEM_ROWS} 条语义已省略`;
-    sem.append(more);
-  }
+  const others = sems.filter((s) => s.kind !== 'part_name');
+
+  const filterBox = document.createElement('input');
+  filterBox.className = 'drw-sem-filter';
+  filterBox.type = 'search';
+  filterBox.placeholder = '搜索零件 / 标注…';
+  sem.append(filterBox);
+
+  const listBox = document.createElement('div');
+  listBox.className = 'drw-sem-list';
+  sem.append(listBox);
+
+  const renderSemResults = () => {
+    const q = (filterBox.value || '').trim();
+    const ql = q.toLowerCase();
+    const hit = (t) => ql === '' || t.toLowerCase().includes(ql);
+    listBox.innerHTML = '';
+
+    const pMatches = partNames.filter((s) => hit(s.text));
+    if (pMatches.length) {
+      const pTitle = document.createElement('div');
+      pTitle.className = 'drw-group-title';
+      pTitle.textContent = `零件 ${pMatches.length}${q && pMatches.length !== partNames.length ? ` / ${partNames.length}` : ''}`;
+      listBox.append(pTitle);
+      appendSemRows(listBox, pMatches);
+    }
+
+    const oMatches = others.filter((s) => hit(s.text));
+    if (oMatches.length) {
+      const oTitle = document.createElement('div');
+      oTitle.className = 'drw-group-title';
+      oTitle.textContent = `其它标注 ${oMatches.length}${q && oMatches.length !== others.length ? ` / ${others.length}` : ''}`;
+      listBox.append(oTitle);
+      // 大图纸可有数千条语义（全部文字标注），全量渲染拖垮信息面板；
+      // 未搜索时截断，有搜索词时放宽上限以便核对结果
+      const MAX_OTHER_ROWS = q ? 400 : 120;
+      appendSemRows(listBox, oMatches.slice(0, MAX_OTHER_ROWS));
+      if (oMatches.length > MAX_OTHER_ROWS) {
+        const more = document.createElement('div');
+        more.className = 'fp-row sem-more';
+        more.textContent = `… 其余 ${oMatches.length - MAX_OTHER_ROWS} 条已省略`;
+        listBox.append(more);
+      }
+    }
+
+    if (!pMatches.length && !oMatches.length) {
+      const empty = document.createElement('div');
+      empty.className = 'fp-row sem-more';
+      empty.textContent = `无匹配：${q}`;
+      listBox.append(empty);
+    }
+  };
+
+  renderSemResults();
+  filterBox.addEventListener('input', renderSemResults);
 }
 
 // 导入 + 渲染主体

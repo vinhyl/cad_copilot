@@ -29,7 +29,7 @@ $ python bootstrap.py
 ```
 ✅ 已登记 cad-engine（stdio MCP）到 WorkBuddy 配置
 ⚠️ 还需你做一步：打开 WorkBuddy「连接器管理 / custom connectors」，
-   找到 cad-engine，点 **Trust（信任）** 启用，我才能调用那 10 个 CAD 工具。
+   找到 cad-engine，点 **Trust（信任）** 启用，我才能调用那 17 个 CAD 工具。
    （build123d_model 默认禁用，无需处理）
 ```
 

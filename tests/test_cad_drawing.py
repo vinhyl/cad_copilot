@@ -28,6 +28,7 @@ def drawing_dxf(tmp_path_factory) -> str:
     msp.add_text("M10x1.5", dxfattribs={"height": 3.0}).set_placement((10, 50))
     msp.add_text("Ø8 H7/g6", dxfattribs={"height": 3.0}).set_placement((60, 40))
     msp.add_text("总装图", dxfattribs={"height": 5.0}).set_placement((40, 65))
+    msp.add_text("DWG NO.001", dxfattribs={"height": 5.0}).set_placement((70, 65))
     path = tmp_path_factory.mktemp("dxf") / "pump_head.dxf"
     doc.saveas(str(path))
     return str(path)
@@ -46,7 +47,8 @@ def test_import_dxf_semantics_and_svg(drawing_dxf, tmp_path):
     assert ("thread", "M10x1.5") in kinds
     assert ("diameter", "8.0") in kinds
     assert ("tolerance", "H7/g6") in kinds
-    assert any(k == "note" for k, _ in kinds)          # 总装图 -> note
+    assert any(k == "note" for k, _ in kinds)          # DWG NO.001 -> note
+    assert not any(v == "总装图" for k, v in kinds)    # v11：图名噪声被过滤
 
     # SVG written and contains the geometry（合并路径架构：描边实体在
     # <path d="M..."> 里，圆是独立元素，文字是独立元素）
@@ -69,6 +71,30 @@ def test_import_idempotent_cache(drawing_dxf, tmp_path):
     r1 = cad_drawing.import_drawing(drawing_dxf, out)
     r2 = cad_drawing.import_drawing(drawing_dxf, out)
     assert r1 == r2                                    # same source content
+
+
+def test_part_name_classification(tmp_path):
+    """v10：语义侧栏"零件"分组——从杂项文字里滤出零件名，剔除
+    图框栏位 / 技术要求 / 视图名 / 标准件规格。"""
+    doctexts = [
+        "齿圈",                    # 定制件后缀，纯中文 → 零件名
+        "咖啡机顶盖组件",           # 定制件后缀"组件" → 零件名
+        "多齿调档座C4-1-1",         # 定制件后缀"座" + 规格 → 零件名
+        "M8X20盘头内六角螺丝",       # 标准件 + M 规格 → 非零件
+        "总装图",                  # 视图/图名 → 非零件
+        "批准",                    # 图框栏位 → 非零件
+        "技术要求：去毛刺",          # 技术要求 → 非零件
+        "V1",                      # 版本 → 非零件
+        "Ø1.5*7密封圈",            # 规格+标准件 → 非零件
+    ]
+    kinds = {}
+    for t in doctexts:
+        kinds[t] = cad_drawing.is_part_name(cad_drawing.clean_entity_text(t))
+
+    for t in ["齿圈", "咖啡机顶盖组件", "多齿调档座C4-1-1"]:
+        assert kinds[t] is True, f"应判为零件名: {t}"
+    for t in ["M8X20盘头内六角螺丝", "总装图", "批准", "技术要求：去毛刺", "V1", "Ø1.5*7密封圈"]:
+        assert kinds[t] is False, f"应滤除: {t}"
 
 
 def test_import_rejects_bad_input(tmp_path):
@@ -129,8 +155,8 @@ def test_svg_entity_limit(tmp_path):
     path = tmp_path / "many.dxf"
     doc.saveas(str(path))
     svg = cad_drawing.dxf_to_svg(doc, max_entities=100)
-    # 合并路径架构：每条 LINE 是 d 里的一个子路径（一个 M 命令）
-    m = re.search(r'<path d="([^"]*)"', svg)
+    # 合并路径架构：每条 LINE 是描边 <path> d 里的一个子路径（一个 M 命令）
+    m = re.search(r'<path vector-effect="non-scaling-stroke" d="([^"]*)"', svg)
     assert m and m.group(1).count("M") == 100
 
 
@@ -154,9 +180,9 @@ def test_svg_merged_path_architecture(tmp_path):
     msp.add_line((2, 0), (3, 0))
     msp.add_circle((5, 5), radius=2, dxfattribs={"layer": "中心线"})
     svg = cad_drawing.dxf_to_svg(doc)
-    m = re.findall(r'<path d="(M[^"]*)"', svg)
-    assert len(m) == 1                        # 全部描边实体 = 1 个 path
-    assert m[0].count("M") == 2               # 两条 LINE 两个子路径
+    m = re.search(r'<path vector-effect="non-scaling-stroke" d="([^"]*)"', svg)
+    assert m is not None                      # 全部描边实体 = 1 个 path
+    assert m.group(1).count("M") == 2         # 两条 LINE 两个子路径
     assert svg.count("<circle") == 1
     assert "data-etype" not in svg            # 字节瘦身：不再逐元素带属性
 
@@ -175,29 +201,31 @@ def test_insert_and_dimension_expansion(tmp_path):
     # Defpoints 层定义点）
     msp.add_linear_dim(base=(0, 20), p1=(0, 0), p2=(30, 0)).render()
     svg = cad_drawing.dxf_to_svg(doc)
-    m = re.search(r'<path d="([^"]*)"', svg)
+    m = re.search(r'<path vector-effect="non-scaling-stroke" d="([^"]*)"', svg)
     assert m and m.group(1).count("M") >= 4   # 2 块引用线 + 标注尺寸线等
     assert "100" in m.group(1)                # 平移后的块引用几何
     assert "<text" in svg                      # 标注数值文本已渲染
     assert svg.count("<path") >= 2             # 描边 path + 箭头 SOLID 填充 path
 
 
-def test_defpoints_and_outlier_entities_excluded():
-    """v5：Defpoints 定义点不渲染；中心点离群的实体（挪出图幅的旧标注）
-    整实体剔除，viewBox 不被撑爆。"""
+def test_outlier_entities_do_not_break_viewbox():
+    """v9：离群实体（挪出图幅的旧标注）**完整渲染**（完整性优先，绝不
+    删除内容），但默认取景框用鲁棒范围（中位数 ± k·MAD）收敛到主体，
+    viewBox 不被离群实体撑爆。"""
     doc = ezdxf.new("R2010")
     msp = doc.modelspace()
     # 主体：密集小几何
     for i in range(80):
         msp.add_line((i, 0), (i, 5))
-    # 离群实体：x=100000 远方的废弃标注（含一条大半径弧扫回图内）
+    # 离群实体：x=100000 远方的废弃标注（完整渲染，但不撑爆取景框）
     msp.add_line((100000, 0), (100010, 0))
     msp.add_text("废", dxfattribs={"height": 3}).set_placement((100005, 1))
     svg = cad_drawing.dxf_to_svg(doc)
-    assert "100000" not in svg                 # 离群实体不渲染
+    assert "100000" in svg                     # v9：离群实体仍完整渲染
+    assert "废" in svg                         # 文字同样完整渲染
     vb = [float(v) for v in
           re.search(r'viewBox="([^"]+)"', svg).group(1).split()]
-    assert vb[2] < 200                         # 宽度按主体 ~80 收敛
+    assert vb[2] < 200                         # 取景框宽度按主体 ~80 收敛
 
 
 def test_hatch_renders_as_filled_path(tmp_path):

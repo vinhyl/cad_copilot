@@ -50,7 +50,150 @@ _RE_THREAD = re.compile(r"\bM(\d+(?:\.\d+)?)\s*[x×]\s*(\d+(?:\.\d+)?)\b")
 _RE_DIAMETER = re.compile(r"[ØøΦφ⌀]\s*(\d+(?:\.\d+)?)")
 _RE_TOLERANCE = re.compile(r"\b([A-Z][0-9])\s*/\s*([a-z][0-9])\b")
 
-# 图纸缓存 schema：渲染逻辑变化（v9：移除"鲁棒过滤丢实体"的错误修复方向
+# --- 零件名称识别（语义侧栏"零件"分组）-----------------------------
+# 装配图纸的零件名通常是"纯中文名词短语"，但混在大量噪声里（图框栏位、
+# 技术要求、日期、球标序号、尺寸/材料/标准件规格标注）。判据为确定性规则：
+# 白噪声白名单命中即排除；标准件词命中即排除；仅当带尺寸规格 + 定制件
+# 后缀（阀芯/齿轮/组件/连接杆等）才豁免。目标不是完美分词，而是把"其余
+# 文字"滤到只剩零件名——实测咖啡机全套图 2685 条 → 131 个零件名聚类。
+_PART_FRAME_WORDS = {  # 标题栏固定栏位（中文，前/后缀可忽略空白）
+    "批准", "标准化", "工艺", "审核", "设计", "日 期", "日期", "比例", "签名",
+    "图号", "物料编号", "版本", "校核", "主管设计", "第 张", "第   张",
+    "共 张", "共   张", "标记", "分区", "处数", "更改文件号", "零件名称",
+    "材料", "数量", "设计者", "制图", "单位", "文件",
+}
+# 排除模式：技术说明 / 视图名 / 加工工艺 / 公差栏 / 材料栏 / 装配说明 等
+_RE_PART_NOISE = re.compile(
+    r"技术要|装配与数量|请按|须|应顺|需|配合|带锥度|实配|调机|加工|表面"
+    r"|镭雕|雷雕|倒角|抛光|氧化|焊接|精车|清角|公差|间距|圆周|滚花|去锐角"
+    r"|线径|圈数|高度|硬度|深度|厚度|产品周边|坯件图|底视图|齿数|齿距|分度圆"
+    r"|smooth|无毛刺|裂纹|崩缺|变形|数量[:：]|贯穿"
+    r"|总装|装配图|爆炸图|剖视|剖面|零件图|明细表|标题栏|视图|向视图|技术要求栏"
+    r"|材料[:：]|一次出|光滑|切口|逆时|顺时针|逆时针|紧入|紧配|过盈|去毛刺"
+    r"|（与|\(与")
+# 标准件词：命中即判非零件（除非带定制件后缀豁免）
+_RE_PART_STD = re.compile(
+    r"螺丝|螺栓|螺钉|垫帽|内六角|盘头|沉头|平头|紧定|密封圈|密封垫|密封胶"
+    r"|胶圈|胶垫|胶条|强磁|磁铁|钢珠|轴销|开口销|滚花|线卡|轴承|销钉|铆钉"
+    r"|商标|丝印|垫片|密封|O型圈|优力胶|硅胶垫|泡棉")
+# 定制件后缀：项目自己设计的零件名常以这些词结尾（可携带数字/规格前缀）
+_RE_PART_CUSTOM_SUFFIX = re.compile(
+    r"阀芯|齿轮|齿圈|连接杆|组件|接头|装饰|托环|托片|轨道环|滑环|定位锁片"
+    r"|内胆|卡簧|卡扣|旋帽|螺帽|螺母|手柄|外壳|壳体|主体|支架|端盖|垫圈|垫片"
+    r"|挡板|平板|面板|托板|底板|盖|座|架|柄|泵|板|杆|套")
+# 尺寸规格前缀：如 Ø8 / M8 / 1.5*7 / 9*10 等
+_RE_PART_SPEC = re.compile(r"Ø|φ|M\d|\d+(?:\.\d+)?[\*×]\d+(?:\.\d+)?|[\d.]+mm")
+
+
+def clean_entity_text(t: str) -> str:
+    """TEXT/MTEXT 实体文本 → 干净可见字符串（剥格式码、折叠换行）。
+
+    MTEXT 内嵌格式码（{\\fSimSun|b0|i0|c134|p2;...}）会原样泄漏到语义侧栏，
+    必须先剥掉才能做零件名语义判断；TEXT 直接就是纯文本。%%C/%P 是 CAD 的
+    φ/± 转义，还原为可见符号。
+    """
+    if not t:
+        return ""
+    try:
+        from ezdxf.tools.text import plain_mtext
+        t = plain_mtext(t)
+    except Exception:  # noqa: BLE001
+        t = re.sub(r"\{\\\\[^}]*\}", "", t).replace("{", "").replace("}", "")
+    t = t.replace("%%C", "Ø").replace("%%P", "±")
+    return t.replace("\\P", " ").strip()
+
+
+def is_part_name(clean_text: str) -> bool:
+    """判断一段干净文本是否零件名。
+
+    判据（确定性规则，不猜）：命中①图框白名单 ②技术/视图/工艺说明
+    ③纯序号/日期/版本/比例/尺寸 ④标准件词（无定制后缀豁免）→ 非零件；
+    否则 2 字以上中文名词短语即为零件名。
+    """
+    s = clean_text
+    if not s:
+        return False
+    # 多行文本是两处标注叠一起（如"手柄接头\\n定位垫片"），不是单个零件名
+    if "\n" in s:
+        return False
+    if s in _PART_FRAME_WORDS:
+        return False
+    # 技术/视图/工艺噪声
+    if _RE_PART_NOISE.search(s):
+        return False
+    # 纯序号 / 剖面符 / 日期 / 版本 / 纯规格尺寸
+    bare = s.replace(" ", "")
+    if re.fullmatch(r"[A-Za-z]{1,2}\d{0,3}|[A-Za-z]", bare):
+        return False
+    if re.fullmatch(r"[A-Za-z]-[A-Za-z]", s) or re.fullmatch(r"[A-Za-z-A-Za-z]", s):
+        return False
+    if re.match(r"^V\d", s) or re.fullmatch(r"\d{6,8}", s):
+        return False
+    if re.fullmatch(r"[0-9 :.x×*\-/±~＞＜（）()]+", s):
+        return False
+    # 标准件词 → 非零件；除非整串同时是"带规格的定制件"（豁免）
+    std_hit = _RE_PART_STD.search(s)
+    cust_hit = _RE_PART_CUSTOM_SUFFIX.search(s)
+    if std_hit:
+        # M 规格螺丝（用户约定：常规规格如 M8 的螺丝不当零件）
+        if re.search(r"\bM\d{1,2}\b|M\d{1,2}[*×]", s):
+            return False
+        if not cust_hit:
+            return False
+        # 带定制后缀但仍是"规格 + 标准件词"的裸标注（Ø1.5*7密封圈）→ 滤
+        if _RE_PART_SPEC.search(s) and re.search(
+                r"密封|胶圈|胶垫|螺丝|垫片|垫圈|强磁|钢珠|销", s):
+            return False
+    # 至少 2 个汉字
+    if len(re.findall(r"[\u4e00-\u9fa5]", s)) < 2:
+        return False
+    return True
+
+
+# 明显无意义的杂项标注：日期 / 页码(第..张/共..张) / 缩放比例(1:2) /
+# 版本号(V1.2) / 纯数字或尺寸残留(/±0.05/0.03)。这些不是零件名也不是有效
+# callout，直接丢弃、不进"其它标注"，避免语义侧栏被噪音刷屏。
+_RE_NOISE_DATE = re.compile(
+    r"^\d{2,4}\s*[-/.]\s*\d{1,2}\s*([-/.]\s*\d{1,2})?\s*$")
+_RE_NOISE_DATE_CN = re.compile(
+    r"^\d{2,4}\s*[年]\s*\d{1,2}\s*[月](?:\s*\d{1,2}\s*[日])?\s*$")
+_RE_NOISE_SHEET = re.compile(r"^(?:第|共)\s*\d{0,4}\s*(?:张|页)\s*$")
+_RE_NOISE_SCALE = re.compile(
+    r"^\d+(?:\.\d+)?\s*[:：]\s*\d+(?:\.\d+)?\s*$")
+_RE_NOISE_VERSION = re.compile(r"^[Vv]\d+(?:\.\d+)*\s*$")
+_RE_NOISE_NUMBER = re.compile(
+    r"^[+\-]?[\d,.]+(?:\.\d+)?\s*(?:mm|MM)?$", re.ASCII)
+# 剖视线 / 视图标记：A、A-A、F1、A13 等字母(数字)短标记
+_RE_NOISE_LETTER = re.compile(r"^[A-Za-z](?:-[A-Za-z])?$")
+_RE_NOISE_CODE = re.compile(r"^[A-Za-z]{1,3}\d{1,4}$")
+# 单行视图/工艺说明（多行技术要求等保留，它们是有意义的正文）
+_RE_NOISE_VIEW = re.compile(r"底视图|坯件图|爆炸图|剖视|剖面|向视图|焊接|明细表|标题栏|装配图|零件图|总装|部件图")
+
+
+def is_noise_note(clean_text: str) -> bool:
+    """True if a non-part-name note carries no semantic value (drop it)."""
+    s = (clean_text or "").strip()
+    if not s:
+        return True
+    # 标题栏固定栏位标签（批准/审核/设计/比例/签名…）：剥空白后精确匹配
+    if s.replace(" ", "") in _PART_FRAME_WORDS:
+        return True
+    for rx in (_RE_NOISE_DATE, _RE_NOISE_DATE_CN, _RE_NOISE_SHEET,
+               _RE_NOISE_SCALE, _RE_NOISE_VERSION, _RE_NOISE_NUMBER,
+               _RE_NOISE_LETTER, _RE_NOISE_CODE):
+        if rx.fullmatch(s):
+            return True
+    if "\n" not in s and _RE_NOISE_VIEW.search(s):
+        return True
+    # 单行工艺/材料/装配说明（一次出光滑、切口、材料：不锈钢…）——
+    # 多行技术要求等正文有信息量，保留
+    if "\n" not in s and _RE_PART_NOISE.search(s):
+        return True
+    return False
+
+# 图纸缓存 schema：语义侧栏新增"零件名"分类（v10）、筛选纯噪声标注
+# （v11：丢弃日期/页码(第..张)/比例(1:2)/版本/纯数字等无意义 note）或渲染逻辑变化
+# （v9：移除"鲁棒过滤丢实体"的错误修复方向
 # ——所有可渲染实体完整渲染，viewBox 仅用于默认取景；修正 LWPOLYLINE
 # 凸度圆弧 sweep 方向（此前镜像到实体错误一侧）；曲线弦高容差收紧到
 # ≤1mm 且椭圆按尺寸自适应加密采样；POINT 标记尺寸封顶避免大图变巨点；
@@ -59,7 +202,7 @@ _RE_TOLERANCE = re.compile(r"\b([A-Z][0-9])\s*/\s*([a-z][0-9])\b")
 # 修复放大后文字糊成"一坨"；v6：TEXT/MTEXT 对齐锚点/旋转/MTEXT \H 覆盖；
 # v5：INSERT/DIMENSION 块展开、HATCH/SOLID 渲染、合并路径架构、
 # MTEXT 格式码清理、Defpoints 过滤）时递增，服务端据此判定旧缓存需重建。
-DRAWING_SCHEMA_VERSION = 9
+DRAWING_SCHEMA_VERSION = 12
 
 # 需展开为叶子实体的容器实体：大型装配图纸的标注几何（尺寸线/箭头/数值
 # 文本）、块引用内容全在这类容器里，跳过它们 = 图纸缺一大块。
@@ -131,10 +274,13 @@ def _dwg_to_dxf(dwg_path: str, out_dir: str) -> str:
 # --------------------------------------------------------------------------
 
 def extract_semantics(doc) -> list:
-    """Extract thread/diameter/tolerance callouts from TEXT/MTEXT/DIMENSION.
+    """Extract thread/diameter/tolerance/part_name callouts from TEXT/MTEXT/DIMENSION.
 
     Returns [{kind, value, text, entity, position}] -- deterministic text
-    parsing, no guessing. `kind` in {thread, diameter, tolerance, note}.
+    parsing, no guessing. `kind` in {thread, diameter, tolerance, note,
+    part_name}. TEXT/MTEXT 先经 `clean_entity_text` 剥格式码；无法归入螺纹/
+    直径/公差的纯中文名词短语经 `is_part_name` 判为零件名（kind=part_name），
+    其余杂项保持 note。
     """
     out = []
     msp = doc.modelspace()
@@ -144,7 +290,7 @@ def extract_semantics(doc) -> list:
                     "position": [round(c, 3) for c in pos] if pos else None})
 
     for e in msp.query("TEXT MTEXT"):
-        text = (e.dxf.get("text", "") or "").strip()
+        text = clean_entity_text(e.dxf.get("text", "") or "")
         if not text:
             continue
         pos = None
@@ -153,15 +299,23 @@ def extract_semantics(doc) -> list:
             pos = (p[0], p[1], 0) if p else None
         except Exception:  # noqa: BLE001
             pass
+        is_callout = False
         for m in _RE_THREAD.finditer(text):
             push("thread", f"M{m.group(1)}x{m.group(2)}", text, pos)
+            is_callout = True
         for m in _RE_DIAMETER.finditer(text):
             push("diameter", float(m.group(1)), text, pos)
+            is_callout = True
         for m in _RE_TOLERANCE.finditer(text):
             push("tolerance", f"{m.group(1)}/{m.group(2)}", text, pos)
-        if not (_RE_THREAD.search(text) or _RE_DIAMETER.search(text)
-                or _RE_TOLERANCE.search(text)):
-            push("note", text, text, pos)
+            is_callout = True
+        if not is_callout:
+            # 非尺寸类文字：零件名 vs 其它杂项；杂项再筛掉纯噪声(日期/页码/比例/…)
+            if is_part_name(text):
+                push("part_name", text, text, pos)
+            else:
+                if not is_noise_note(text):
+                    push("note", text, text, pos)
 
     for e in msp.query("DIMENSION"):
         mtext = (e.dxf.get("text", "") or "").strip()
