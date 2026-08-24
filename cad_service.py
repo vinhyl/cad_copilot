@@ -56,6 +56,13 @@ from cad_core import _SuppressStdout
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8764
 
+# 双 token 入口（方案 B）默认值，均可用环境变量覆盖：
+#   - guest ``cad-guest-2026``：普通用户**默认操作通道**，agent 默认一律用它，
+#     只做使用口径。
+#   - dev   ``cad-local-dev-2026``：开发通道，仅当显式进入开发模式时才切换。
+GUEST_TOKEN = "cad-guest-2026"
+DEV_TOKEN = "cad-local-dev-2026"
+
 _REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_FRONTEND_DIR = os.path.join(_REPO_ROOT, "frontend", "dist")
 
@@ -180,10 +187,20 @@ def create_app(token: str | None = None,
             CAD_SERVICE_FRONTEND_DIR env or ./frontend/dist. Missing dir ->
             /app returns 503 with a hint (run npm run build).
     """
-    # 固定默认 token，保证任何启动方式（含直接 `python cad_service.py`）产出的
-    # token 都与文档/agent 使用的 `cad-local-dev-2026` 一致，避免 LLM 用随机 token
-    # 拼 URL 导致鉴权失败。可用 CAD_SERVICE_TOKEN 环境变量覆盖。
-    token = token or os.environ.get("CAD_SERVICE_TOKEN") or "cad-local-dev-2026"
+    # 双 token 入口（方案 B）：guest 为**默认操作通道**，dev 需显式触发。
+    #   - guest ``cad-guest-2026``：普通用户通道，agent 默认一律用它（URL /
+    #     自调 API / MCP），只做使用口径。
+    #   - dev ``cad-local-dev-2026``：开发通道，仅当开发者显式说"开发模式/开发
+    #    需求"时才切到它，可谈开发话题、执行开发动作。
+    # 服务同时认两个 token，避免任一通道鉴权失败；按请求 token 判定 mode。
+    # 两个都可用环境变量覆盖：CAD_SERVICE_TOKEN（dev）、CAD_SERVICE_GUEST_TOKEN。
+    guest_token = os.environ.get("CAD_SERVICE_GUEST_TOKEN") or GUEST_TOKEN
+    dev_token = token or os.environ.get("CAD_SERVICE_TOKEN") or DEV_TOKEN
+    valid_tokens = {guest_token, dev_token}
+    operating_token = guest_token   # 默认操作通道 = guest
+
+    def mode_of(supplied: str) -> str:
+        return "dev" if supplied == dev_token else "guest"
     allowed_dirs = allowed_dirs or [
         os.path.abspath(p)
         for p in os.environ.get("CAD_SERVICE_ALLOWED_DIRS", ".").split(os.pathsep)
@@ -313,7 +330,7 @@ def create_app(token: str | None = None,
         supplied = (request.headers.get("authorization", "")
                     .removeprefix("Bearer ").strip()
                     or request.headers.get("x-service-token", ""))
-        if not secrets.compare_digest(supplied, token):
+        if supplied not in valid_tokens:
             raise PermissionError("invalid or missing token")
 
     # ----------------------------------------------------------------------
@@ -325,12 +342,16 @@ def create_app(token: str | None = None,
                              "schema_version": cad_assembly.SCHEMA_VERSION})
 
     async def config(request):
-        """UI guidance: which dirs user-supplied input paths may live in."""
+        """UI guidance: allowed input dirs + 当前请求所属入口 mode。"""
         try:
             check_auth(request)
         except PermissionError as e:
             return JSONResponse({"error": str(e)}, status_code=401)
-        return JSONResponse({"allowed_dirs": allowed_dirs})
+        supplied = (request.headers.get("authorization", "")
+                    .removeprefix("Bearer ").strip()
+                    or request.headers.get("x-service-token", ""))
+        return JSONResponse({"allowed_dirs": allowed_dirs,
+                             "mode": mode_of(supplied)})
 
     _UPLOAD_EXTS = {".step", ".stp", ".dxf", ".dwg"}
     _MAX_UPLOAD_BYTES = 1 << 30  # 1 GiB
@@ -1807,7 +1828,7 @@ def create_app(token: str | None = None,
         "report_added"|"selection_changed", ...}``（M6）。长任务仍走
         HTTP job 端点轮询（R5）。"""
         supplied = websocket.query_params.get("token", "")
-        if not secrets.compare_digest(supplied, token):
+        if supplied not in valid_tokens:
             await websocket.close(code=4401)
             return
         await websocket.accept()
@@ -1943,7 +1964,9 @@ def create_app(token: str | None = None,
         Route("/app/{rest:path}", app_static, methods=["GET"]),
         WebSocketRoute("/ws", ws),
     ], exception_handlers={404: not_found})
-    app.state.token = token
+    app.state.token = operating_token
+    app.state.guest_token = guest_token
+    app.state.dev_token = dev_token
     app.state.allowed_dirs = allowed_dirs
     app.state.workspace = workspace
     app.state.frontend_dir = frontend_dir
@@ -1956,7 +1979,8 @@ def main() -> None:
     port = int(os.environ.get("CAD_SERVICE_PORT", DEFAULT_PORT))
     app = create_app()
     print(f"[cad-service] listening on http://{host}:{port} "
-          f"(token: {app.state.token})")
+          f"(default operating token: {app.state.token}; "
+          f"guest={app.state.guest_token} dev={app.state.dev_token})")
     uvicorn.run(app, host=host, port=port, log_level="warning")
 
 

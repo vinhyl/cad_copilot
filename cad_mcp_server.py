@@ -412,7 +412,10 @@ def _service_call(method: str, path: str, body: dict | None = None,
     """Call the local cad_service API (stdlib urllib only, no new deps)."""
     import urllib.request
     import urllib.error
-    tok = os.environ.get("CAD_SERVICE_TOKEN", "")
+    # 默认操作通道 = guest（普通用户）；开发模式由 agent 显式切到 CAD_SERVICE_TOKEN。
+    tok = os.environ.get("CAD_SERVICE_GUEST_TOKEN")
+    if not tok:
+        tok = os.environ.get("CAD_SERVICE_TOKEN", "")
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(_service_url(path, params),
                                  data=data, method=method)

@@ -18,9 +18,11 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$SCRIPT_DIR"
 
-TOKEN="cad-local-dev-2026"
+# 双 token 入口（方案 B）：默认操作通道 = guest（普通用户），dev 需显式触发。
+GUEST_TOKEN="cad-guest-2026"
+DEV_TOKEN="cad-local-dev-2026"
 PORT=8764
-URL="http://127.0.0.1:${PORT}/app/drawing.html?token=${TOKEN}"
+URL="http://127.0.0.1:${PORT}/app/drawing.html?token=${GUEST_TOKEN}"
 
 # ---- 按 OS 选择 venv 解释器与"打开浏览器"命令 ----
 OS="$(uname -s 2>/dev/null || echo unknown)"
@@ -35,7 +37,7 @@ case "$OS" in
     ;;
 esac
 
-up() { curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer ${TOKEN}" "http://127.0.0.1:${PORT}/api/config" 2>/dev/null; }
+up() { curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer ${GUEST_TOKEN}" "http://127.0.0.1:${PORT}/api/config" 2>/dev/null; }
 
 stop_server() {
   case "$OS" in
@@ -64,7 +66,8 @@ case "${1:-status}" in
     if [ "$code" = "200" ]; then echo "already UP"; exit 0; fi
     echo "starting cad_service on :${PORT} …"
     cd "$REPO" || exit 1
-    export CAD_SERVICE_TOKEN="$TOKEN"
+    export CAD_SERVICE_TOKEN="$DEV_TOKEN"
+    export CAD_SERVICE_GUEST_TOKEN="$GUEST_TOKEN"
     # exec:让本后台任务即 python 进程,随会话存活
     exec "$PY" cad_service.py
     ;;
