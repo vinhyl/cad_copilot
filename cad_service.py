@@ -874,7 +874,8 @@ def create_app(token: str | None = None,
                                      if moves else manifest)
                     # 2) 重放草稿几何步骤，得到 {tid: shape}
                     edited_shapes = cad_assembly.replay_draft_shapes(
-                        cache_dir, manifest, store, steps)
+                        cache_dir, manifest, store, steps,
+                        cache_root=cache_root)
                     # 3) 落盘每个被编辑模板的草稿 gltf（预览目录，不进版本链）
                     for tid, shp in edited_shapes.items():
                         tpl = next((t for t in manifest["templates"]
@@ -969,7 +970,8 @@ def create_app(token: str | None = None,
                 with _GEOMETRY_LOCK, _SuppressStdout():
                     # 1) 重放草稿（move 步骤在 shapes 重放中自动跳过）
                     edited_shapes = cad_assembly.replay_draft_shapes(
-                        cache_dir, manifest, store, steps)
+                        cache_dir, manifest, store, steps,
+                        cache_root=cache_root)
                     # 1b) M6.5 实例级位移
                     moves = cad_assembly.moves_from_steps(steps)
                     gate_manifest = (cad_assembly.apply_moves(manifest, moves)
@@ -1073,7 +1075,7 @@ def create_app(token: str | None = None,
         progress("replay", 6, "重放草稿步骤")
         with _GEOMETRY_LOCK, _SuppressStdout():
             edited = cad_assembly.replay_draft_shapes(
-                cache_dir, manifest, store, steps)
+                cache_dir, manifest, store, steps, cache_root=cache_root)
             if tid not in edited:
                 raise ValueError(
                     f"草稿没有编辑模板 {tid}（步骤表为空或不涉及该模板）")
@@ -1245,9 +1247,11 @@ def create_app(token: str | None = None,
         return JSONResponse({"ok": True, "cache_key": cache_key})
 
     async def selection_get(request):
-        """GET /api/selection[?cache_key=ck] -- 读用户选中（M6）。
+        """GET /api/selection[?cache_key=ck | ?all=1] -- 读用户选中（M6）。
 
-        带 cache_key 返回该会话的选中；不带则返回全部会话中最新的一条
+        带 cache_key 返回该会话的选中；带 ``all=1`` 返回全部缓存Key的选中
+        （每条带 cache_key / source_file / 零件上下文，供 agent 跨文件分辨
+        "哪个零件来自哪个文件"）；两者都不带则返回全部会话中最新的一条
         （agent 消解"这个"的默认语义）。响应附带节点/模板/特征上下文。
         """
         try:
@@ -1263,7 +1267,24 @@ def create_app(token: str | None = None,
             with open(fp, encoding="utf-8") as f:
                 rec = json.load(f)
             return JSONResponse(_selection_enriched(rec))
-        # 无 cache_key：全目录按 mtime 最新
+        # ?all=1：聚合全部 cacheKey 的选中，跨文件语义（agent 一次看到多个）
+        if request.query_params.get("all", "0") in ("1", "true", "yes"):
+            items = []
+            if os.path.isdir(selection_root):
+                for fn in os.listdir(selection_root):
+                    if not fn.endswith(".json"):
+                        continue
+                    fp = os.path.join(selection_root, fn)
+                    try:
+                        with open(fp, encoding="utf-8") as f:
+                            rec = json.load(f)
+                        if rec.get("node_id") or rec.get("feature_id"):
+                            items.append(_selection_enriched(rec))
+                    except Exception:  # noqa: BLE001
+                        continue
+            items.sort(key=lambda r: r.get("updated", ""), reverse=True)
+            return JSONResponse({"selections": items})
+        # 无 cache_key / all：全目录按 mtime 最新
         best, best_mt = None, -1.0
         if os.path.isdir(selection_root):
             for fn in os.listdir(selection_root):

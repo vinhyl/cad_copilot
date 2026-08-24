@@ -460,7 +460,7 @@ def list_sessions() -> str:
 
 
 @mcp.tool()
-def get_user_selection(cache_key: str = "") -> str:
+def get_user_selection(cache_key: str = "", all_selections: bool = False) -> str:
     """Read what the user has selected in the browser viewport (M6).
 
     The Web frontend uploads every part/feature click. Call this to resolve
@@ -471,12 +471,25 @@ def get_user_selection(cache_key: str = "") -> str:
     interactive picking, so "enlarge #3" targets exactly what the user
     clicked.
 
+    For the two-file workflow (e.g. "替换总装配里的一个零件"): set
+    all_selections=True to get EVERY open file's current selection at once.
+    Each record carries its own cache_key + source_file, so you can tell
+    WHICH part comes from WHICH file in a single call and propose a plan
+    across those two operands.
+
     Args:
         cache_key: optional session filter. Empty = the most recent
                    selection across ALL sessions (the usual "这个").
-    Returns: JSON selection record, or {empty: true} when nothing was
-    ever selected.
+        all_selections: if True, return a JSON array {selections: [...]}
+                   with each open file's current non-empty selection
+                   (sorted newest-first), ignoring cache_key.
+    Returns: JSON selection record / array, or {empty: true} when nothing
+    was ever selected.
     """
+    if all_selections:
+        return json.dumps(_service_call("GET", "/api/selection",
+                                        params={"all": "1"}),
+                          ensure_ascii=False, indent=2)
     params = {"cache_key": cache_key} if cache_key else None
     return json.dumps(_service_call("GET", "/api/selection", params=params),
                       ensure_ascii=False, indent=2)
@@ -510,7 +523,13 @@ def preview_draft(cache_key: str, steps: str) -> str:
         steps: JSON array of declarative steps, each
                {template_id, operation, params, feature_id?}. Operations:
                template-level drill/fillet/chamfer/scale; feature-level
-               hole_resize etc. (ids from pick_features / the selection)
+               hole_resize etc. (ids from pick_features / the selection);
+               "replace" swaps a template's geometry for an external part:
+               params.source_cache_key + source_template_id (the OTHER file's
+               cache_key / template_id from get_user_selection(all_selections=True)),
+               params.align = origin|base|top|center|seat or a per-axis dict
+               like {"z": "min"} (default base). Replaces all instances in
+               place -- the draft preview + interference gate validate it.
     Returns: JSON {interferences, edited_templates, diff} (the full draft
     manifest is trimmed away -- call read_draft/pick_features for details).
     """

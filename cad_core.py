@@ -354,3 +354,13 @@ def scale_shape(shape: "TopoDS_Shape", factor: float,
     t = gp_Trsf()
     t.SetScale(gp_Pnt(*center), float(factor))
     return BRepBuilderAPI_Transform(shape, t).Shape()
+
+
+def translate_shape(shape: "TopoDS_Shape", dx: float = 0.0, dy: float = 0.0,
+                    dz: float = 0.0) -> "TopoDS_Shape":
+    """Translate a shape by (dx, dy, dz) (world/LOCAL coords, 1:1 mm)."""
+    from OCP.BRepBuilderAPI import BRepBuilderAPI_Transform
+    from OCP.gp import gp_Trsf, gp_Vec
+    t = gp_Trsf()
+    t.SetTranslation(gp_Vec(float(dx), float(dy), float(dz)))
+    return BRepBuilderAPI_Transform(shape, t, True).Shape()

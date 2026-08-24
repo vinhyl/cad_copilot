@@ -701,6 +701,19 @@ function renderRecent() {
       draft.className = 'recent-badge draft';
       draft.textContent = `草稿 ${s.draft_steps} 步`;
       row.appendChild(draft);
+      // 查看草稿效果入口：直达编辑页基线 vs 草稿双视口（编辑页会自动恢复
+      // 并 preview 该草稿）。不区分来源——AI 经 MCP 写草稿 / 网页手动存草稿
+      // 都走同一判定（draft_steps>0）。
+      const preview = document.createElement('button');
+      preview.type = 'button';
+      preview.className = 'recent-badge cta';
+      preview.textContent = '预览草稿';
+      preview.title = '查看编辑效果：基线 vs 草稿 双视口';
+      preview.addEventListener('click', (e) => {
+        e.stopPropagation();   // 阻止行自身的「加载装配」行为
+        goEditWithLoad(encodeScope({ cacheKey: s.cache_key, level: 'root' }));
+      });
+      row.appendChild(preview);
     }
     const ver = document.createElement('span');
     ver.className = 'recent-badge';

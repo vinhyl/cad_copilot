@@ -1029,9 +1029,121 @@ def check_interference(manifest: dict, template_shapes: dict,
 # ==========================================================================
 DRAFT_SCHEMA_VERSION = 1
 
+# --------------------------------------------------------------------------
+# replace 步骤的外来零件对齐框架。
+# 对齐 = 源(replace 进来的外来 STEP 包围盒) → 目标(被替换模板当前形状包围盒)
+# 的平移。按轴 (x/y/z) 各自指定锚点，锚点 ∈ {origin, min, max, center}，
+# 用字典可实现"各种情况"的任意组合；预设名覆盖常见场景。可扩展：新增
+# 策略只需在锚点表里加一个行为，或由调用方在 params.align 传原始 dict。
+# --------------------------------------------------------------------------
+
+ALIGN_ANCHORS = ("origin", "min", "max", "center")
+
+ALIGN_PRESETS = {
+    # origin: 源不动（两文件原点本就一致，直替）
+    "origin": {"x": "origin", "y": "origin", "z": "origin"},
+    # base: 源包围盒 min 角对齐目标 min 角 → 从目标底面向上长（"加高版"）
+    "base": {"x": "min", "y": "min", "z": "min"},
+    # top: 源包围盒 max 角对齐目标 max 角 → 顶面对齐、向下长
+    "top": {"x": "max", "y": "max", "z": "max"},
+    # center: 两包围盒中心重合
+    "center": {"x": "center", "y": "center", "z": "center"},
+    # horizontal: xy 平面对齐 min、z 保持原点（部件接合面在同一底面、y 轴
+    # 已对齐仅高度不同时用）
+    "seat": {"x": "min", "y": "min", "z": "origin"},
+}
+
+ALIGN_DEFAULT = "base"
+
+
+def _anchor_value(target_bbox: dict, source_bbox: dict, ax: int, anchor: str) -> float:
+    """返回把源沿某轴平移多少，使锚点与目标对齐（target-relative delta）。"""
+    axes = "xyz"
+    if anchor == "origin":
+        return 0.0
+    tmin, tmax = target_bbox["min"], target_bbox["max"]
+    smin, smax = source_bbox["min"], source_bbox["max"]
+    def _c(mn, mx):  # center of an axis span
+        return mn[ax] + (mx[ax] - mn[ax]) / 2.0
+    if anchor == "min":
+        return tmin[ax] - smin[ax]
+    if anchor == "max":
+        return tmax[ax] - smax[ax]
+    if anchor == "center":
+        return _c(tmin, tmax) - _c(smin, smax)
+    raise ValueError(f"unknown align anchor: {anchor} ({axes[ax]}-axis)")
+
+
+def normalize_align(align) -> dict:
+    """把 params.align 归一成 {x:, y:, z:} per-axis anchor dict。
+
+    支持：
+      - 字符串预设名（ALIGN_PRESETS）
+      - per-axis dict，如 {"x": "min", "y": "center", "z": "origin"}
+    """
+    if isinstance(align, dict):
+        axes = "xyz"
+        mode = {k.lower(): str(v).lower() for k, v in align.items() if k in axes}
+        for a in axes:
+            if mode.get(a) not in ALIGN_ANCHORS:
+                raise ValueError(
+                    f"align.{a} must be one of {ALIGN_ANCHORS}, got {mode.get(a)}")
+        return {a: mode.get(a, "origin") for a in axes}
+    name = str(align or ALIGN_DEFAULT).lower()
+    if name not in ALIGN_PRESETS:
+        raise ValueError(
+            f"unknown align preset: {name} (available: {sorted(ALIGN_PRESETS)})"
+            f"; or pass a per-axis dict like {{'z': 'min'}}")
+    return dict(ALIGN_PRESETS[name])
+
+
+def align_translation(target_bbox: dict, source_bbox: dict,
+                      align) -> list:
+    """替换对齐：返回 [dx, dy, dz] 平移量，把源包围盒按锚点对齐到目标。"""
+    mode = normalize_align(align)
+    return [_anchor_value(target_bbox, source_bbox, i, mode["xyz"[i]])
+            for i in range(3)]
+
+
+def apply_replace(target_shape, params, cache_root):
+    """replace 步骤：用外来模板几何覆盖目标模板当前形状。
+
+    ``params``::
+      source_cache_key:    外来零件所在会话 cache_key（如 agent 从
+                           get_user_selection(all_selections=True) 拿到的
+                           该文件 cache_key）
+      source_template_id:  外来零件在该会话里的模板 id（parts/<tid>.step）
+      align:               对齐方式，见 normalize_align（默认 base）
+      dx/dy/dz:            可选额外偏移（叠加在对齐结果之后）
+    """
+    src_key = params.get("source_cache_key")
+    src_tid = params.get("source_template_id")
+    if not src_key or not src_tid:
+        raise ValueError("replace needs params.source_cache_key "
+                         "& source_template_id")
+    if not cache_root:
+        raise ValueError("replace requires cache_root to resolve source_step")
+    # 安全解析：外来模板必须落在 cache 目录内
+    src_step = os.path.realpath(
+        os.path.join(cache_root, str(src_key), "parts", f"{str(src_tid)}.step"))
+    if not (os.path.realpath(cache_root) == src_step
+            or src_step.startswith(os.path.realpath(cache_root) + os.sep)):
+        raise PermissionError("replace source escapes cache_root")
+    if not os.path.isfile(src_step):
+        raise ValueError(f"replace source not found: {src_step}")
+    src_shape = cad_core.read_shape(src_step)
+
+    t_bbox = cad_core.properties(target_shape)["bounding_box"]
+    s_bbox = cad_core.properties(src_shape)["bounding_box"]
+    d = align_translation(t_bbox, s_bbox, params.get("align", ALIGN_DEFAULT))
+    d = [d[0] + float(params.get("dx", 0)),
+         d[1] + float(params.get("dy", 0)),
+         d[2] + float(params.get("dz", 0))]
+    return cad_core.translate_shape(src_shape, *d)
+
 
 def replay_draft_shapes(cache_dir: str, manifest: dict, store,
-                         steps: list) -> dict:
+                         steps: list, cache_root: str | None = None) -> dict:
     """Replay the draft's ordered step list over the baseline geometry.
 
     Returns ``{template_id: shape}`` for every template touched by the
@@ -1066,6 +1178,12 @@ def replay_draft_shapes(cache_dir: str, manifest: dict, store,
             step_path = store.resolve_step(
                 tid, baseline_step=os.path.join(cache_dir, "parts", f"{tid}.step"))
             shape = cad_core.read_shape(step_path)
+
+        # 特殊操作：replace（外来 STEP 覆盖本模板几何，含对齐）
+        if op.lower() == "replace":
+            shape = apply_replace(shape, params, cache_root)
+            touched[tid] = shape
+            continue
 
         if feature_id is not None:
             feats_json = os.path.join(cache_dir, "features", f"{tid}.json")
@@ -1170,6 +1288,11 @@ def draft_step_title(step: dict, manifest: dict) -> str:
     op = step.get("operation", "?")
     params = step.get("params") or {}
     fid = step.get("feature_id")
+    if op.lower() == "replace":
+        return (f"{tpl_name}: replace 来源="
+                f"{params.get('source_template_id', '?')}"
+                f"@{str(params.get('source_cache_key', '?'))[:8]}"
+                f" align={params.get('align', ALIGN_DEFAULT)}")
     if fid:
         return f"{tpl_name} {fid}: {op} " + ", ".join(f"{k}={v}" for k, v in params.items())
     return f"{tpl_name}: {op} " + ", ".join(f"{k}={v}" for k, v in params.items())
