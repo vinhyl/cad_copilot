@@ -5,6 +5,12 @@
 
 ## [未发布]
 
+### 修复 (Fixed)（编辑页侧栏超高撑开模型窗口）
+- **左右侧栏高度锁在第一屏**：`.edit-ws` 显式 `grid-template-rows: minmax(0,1fr)`
+  + `.rail` `min-height:0`，行高不再随侧栏内容（步骤表 / 验证轨道条目多时）自动
+  撑大；`.rail-body` 自带 `overflow:auto` 在锁高后生效，超出部分在侧栏内滚动，
+  中间的模型视口始终保持在首屏高度内，不再被推向屏外。
+
 ### 变更 (Changed)（编辑会话验证轨道：干涉高亮 + 精检结果跨刷新保留 + 手动重置）
 - **点击干涉结果高亮对应零件**：`renderVerify` 的每条干涉卡片（精检/粗筛/窄屏
   抽屉）均可点击，`focusInterference` 在双视口用 `AssemblyScene.highlightPair`

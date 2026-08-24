@@ -849,13 +849,14 @@ html, body {
   flex: 1; min-height: 0;
   display: grid;
   grid-template-columns: 260px 1fr 260px;
+  grid-template-rows: minmax(0, 1fr);   /* 行高锁在容器内，不被侧栏内容撑大 */
   gap: 1px;
   background: #2c2c33;
 }
 .rail {
   background: #1e1e23;
   display: flex; flex-direction: column;
-  min-width: 0;
+  min-width: 0; min-height: 0;          /* 允许在行高内收缩 ↕ 内部滚动 */
 }
 .rail-head {
   padding: 10px 12px; border-bottom: 1px solid #2c2c33;
