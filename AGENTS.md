@@ -11,10 +11,10 @@
    返回 `200` 即在线）
 2. **不在线则启动**：`bash cad_service_ctl.sh start`
    ⚠️ **必须用「后台任务」方式执行**（工具里的 `run_in_background`）。脚本内部
-   `exec python cad_service.py`，该后台任务即服务进程本身；用普通命令前台跑会被
+   `exec <venv/python> cad_service.py`（venv 解释器按 OS 自动选择），该后台任务即服务进程本身；用普通命令前台跑会被
    命令结束杀掉。
 3. **打开页面**：`bash cad_service_ctl.sh open`
-   （macOS 调系统默认浏览器打开；非 macOS 或失败则把下方 URL 给用户）
+   （自动调系统默认浏览器打开；若打开失败则把下方 URL 给用户）
 
 ## 固定地址（token 永远是 `cad-local-dev-2026`）
 
@@ -33,8 +33,9 @@
 服务随对话会话存活（足够一次交互），长时间不用被回收属正常；用户再次要处理时
 重跑第 1–3 步即可。**无需开机自启 / 永久常驻。**
 
-（若用户确要永久常驻：在真实终端 `launchctl load ~/Library/LaunchAgents/com.cadcopilot.service.plist`
-或双击 `start_cad_service.command`。）
+（若用户确要永久常驻：macOS 在真实终端 `launchctl load ~/Library/LaunchAgents/com.cadcopilot.service.plist`
+或双击 `start_cad_service.command`；Windows 可建计划任务 / 开机脚本，或会话内直接 `bash cad_service_ctl.sh start`。
+主动停止用 `bash cad_service_ctl.sh stop`（跨平台，自动按 OS 选 `lsof` / `netstat`+`taskkill`）。）
 
 ## 其它约定
 

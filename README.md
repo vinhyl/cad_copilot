@@ -22,7 +22,7 @@ MCP server 供 agent 以 stdio 调用同一套几何能力（双 transport，共
    `exec python cad_service.py`，该后台任务即服务进程本身；用普通命令前台跑会被
    命令结束杀掉。
 3. **打开页面**：`bash cad_service_ctl.sh open`
-   （macOS 调系统默认浏览器打开；非 macOS 或失败则把下方 URL 给用户）
+   （自动调系统默认浏览器打开；若打开失败则把下方 URL 给用户）
 4. **固定地址**（token 固定为 `cad-local-dev-2026`，**不要**依赖"启动时随机打印的 token"）：
    - 图纸对照：`http://127.0.0.1:8764/app/drawing.html?token=cad-local-dev-2026`
    - 装配预览：`http://127.0.0.1:8764/app/?token=cad-local-dev-2026&load=<encodeURIComponent(绝对路径)>`
@@ -85,7 +85,9 @@ https://www.opendesign.com/guestfiles/oda_file_converter 。用户同意后，ag
 ## 快速开始：启动 Web 服务
 
 > **Agent / LLM 请直接看上方「🤖 给 Agent / LLM 的操作须知」**，用 `cad_service_ctl.sh`
-> 探活 / 启动 / 打开，不要手动 `python cad_service.py`。
+> 探活 / 启动 / 打开 / 停止，不要手动 `python cad_service.py`。
+>
+> `cad_service_ctl.sh` 已**跨平台**（macOS / Linux / Windows-GitBash 通用）：仓库根由脚本自身位置自动推导（不写死任何绝对路径），venv 解释器、打开浏览器、停止命令均按 OS 自动选择——同一份脚本在任意设备 / 任意路径下都能直接用。
 
 人工启动（固定 token `cad-local-dev-2026`，无需看启动日志）：
 ```bash
