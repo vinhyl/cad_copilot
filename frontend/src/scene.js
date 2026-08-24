@@ -70,6 +70,7 @@ export class AssemblyScene {
     this.templateBoxes = new Map();
     this.featureGltfCache = new Map();  // templateId -> {nodes:Map(name->Object3D)}
     this.featureState = null;           // {templateId, instanceId, featureId}
+    this.overlayOffsets = new Map();    // templateId -> [dx,dy,dz]（换件后新零件特征的对齐平移，仅草稿场景用）
     this.pickHandler = null;
 
     // 拖拽移动（TransformControls + 代理 Object3D）
@@ -194,11 +195,12 @@ export class AssemblyScene {
     return this.instances.size;
   }
 
-  /** 高亮一组零件实例（partIds 为 null 时清除）。 */
-  highlight(partIds) {
+  /** 高亮一组零件实例（partIds 为 null 时清除）。color 可选，缺省用默认选中色。 */
+  highlight(partIds, color) {
     const sel = partIds || new Set();
+    const c = color || SELECT_COLOR;
     for (const [id, { mesh, index }] of this.instances) {
-      mesh.setColorAt(index, sel.has(id) ? SELECT_COLOR : BASE_COLOR);
+      mesh.setColorAt(index, sel.has(id) ? c : BASE_COLOR);
       if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
     }
   }
@@ -263,8 +265,9 @@ export class AssemblyScene {
   onCameraChange(cb) { this.cameraChangeCb = cb; }
 
   /** 把相机取景到给定零件集合的包围盒（范围切换自动取景）。
-   * ids 为 null 时对整体 bbox 取景（等价首次加载）。 */
-  fitToIds(ids) {
+   * ids 为 null 时对整体 bbox 取景（等价首次加载）。
+   * pad=>1 让相机离得更远（如搜索定位时想留点余量）。 */
+  fitToIds(ids, pad = 1) {
     const box = new THREE.Box3();
     if (!ids) {
       if (!this.bbox.isEmpty()) box.copy(this.bbox);
@@ -285,7 +288,7 @@ export class AssemblyScene {
       }
     }
     if (box.isEmpty()) return;
-    this._fitCameraTo(box);
+    this._fitCameraTo(box, pad);
   }
 
   /** 移动结束回调（TransformControls 拖拽松开）：草稿 move 步骤的入口。 */
@@ -342,6 +345,16 @@ export class AssemblyScene {
     return inst ? inst.mesh.userData.templateId : null;
   }
 
+  /** 清除某模板的特征 glTF 缓存（换件后 overlay 几何/列表已变，强制重载）。 */
+  clearFeatureGltf(tid) { this.featureGltfCache.delete(tid); }
+
+  /** 设置某模板特征 overlay 的额外平移（换件对齐偏移；仅草稿场景需要）。 */
+  setOverlayOffset(tid, d) {
+    if (d) this.overlayOffsets.set(tid, d);
+    else this.overlayOffsets.delete(tid);
+    this._syncOverlay();
+  }
+
   /** 特征 glTF 模板级缓存（promise；失败清除条目允许重试）。 */
   _featureGltf(tid) {
     let load = this.featureGltfCache.get(tid);
@@ -350,9 +363,11 @@ export class AssemblyScene {
     if (!tpl?.features) return null;
     load = (async () => {
       const loader = new GLTFLoader();
+      const featRel = tpl.features;   // 可能是相对路径(基线)，或被换件重指向的绝对路径
+      const urlOf = (rel) => (rel && rel.startsWith('/')) ? rel : `${this.baseUrl}/${rel}`;
       const [gltf, feats] = await Promise.all([
-        loader.loadAsync(`${this.baseUrl}/${tpl.features.replace('.json', '.gltf')}`),
-        fetch(`${this.baseUrl}/${tpl.features}`)
+        loader.loadAsync(urlOf(featRel.replace('.json', '.gltf'))),
+        fetch(urlOf(featRel))
           .then((r) => (r.ok ? r.json() : []))
           .catch(() => []),
       ]);
@@ -394,19 +409,34 @@ export class AssemblyScene {
     const { nodes, origBySan } = await load;
     const inst = this.instances.get(partId);
     if (!inst || !nodes.size) return null;
-    // 特征 glTF 是模板局部坐标：把世界射线逆变换到局部空间再求交
+    // 特征 glTF 是模板局部坐标：把世界射线逆变换到局部空间再求交。
+    // 换件模板的 overlay 还叠加了对齐偏移（_syncOverlay 里 multiply），这里必须一致，
+    // 否则射线与渲染出来的 overlay 错位 → 特征难选中/选不到。
     const m = new THREE.Matrix4();
     inst.mesh.getMatrixAt(inst.index, m);
+    const off = this.overlayOffsets.get(tid);
+    if (off) m.multiply(new THREE.Matrix4().makeTranslation(off[0], off[1], off[2]));
     const raycaster = new THREE.Raycaster();
     raycaster.setFromCamera(ndc, this.camera);
     raycaster.ray.applyMatrix4(m.clone().invert());
     // 递归检测：多 primitive 特征节点是 Group，非递归永远打不中
     const hits = raycaster.intersectObjects([...nodes.values()], true);
-    if (!hits.length) return null;
-    // 沿父链回溯到特征顶层节点，再经 sanitize 名映射回原始特征 id
-    let o = hits[0].object;
-    while (o && !origBySan.has(o.name)) o = o.parent;
-    return o ? origBySan.get(o.name) : null;
+    if (hits.length) {
+      // 沿父链回溯到特征顶层节点，再经 sanitize 名映射回原始特征 id
+      let o = hits[0].object;
+      while (o && !origBySan.has(o.name)) o = o.parent;
+      return o ? origBySan.get(o.name) : null;
+    }
+    // 兜底：没直接命中（点击点落在棱/缝）→ 返回离（变换到局部空间的）射线最近的特征。
+    // 保证"点零件 = 选中一个确定特征"（严格特征优先，不产生"零件级"独立态）。
+    let best = null, bestD = Infinity;
+    const wp = new THREE.Vector3();
+    for (const [oid, nd] of nodes) {
+      nd.getWorldPosition(wp);
+      const d = raycaster.ray.distanceToPoint(wp);
+      if (d < bestD) { bestD = d; best = oid; }
+    }
+    return best;
   }
 
   /** 特征拾取 overlay：加载模板 features glTF，高亮指定特征。
@@ -464,7 +494,8 @@ export class AssemblyScene {
     this.featureState = null;
   }
 
-  /** overlay 跟随实例当前世界矩阵（含爆炸与临时移动）。 */
+  /** overlay 跟随实例当前世界矩阵（含爆炸与临时移动）。
+ *  换件模板额外叠加对齐平移（overlay 为来源零件局部坐标，需平移贴到新零件上）。 */
   _syncOverlay() {
     if (!this.featureState) return;
     const inst = this.instances.get(this.featureState.instanceId);
@@ -473,6 +504,10 @@ export class AssemblyScene {
     if (mesh) {
       const m = new THREE.Matrix4();
       inst.mesh.getMatrixAt(inst.index, m);
+      const off = this.overlayOffsets.get(this.featureState.templateId);
+      if (off) {
+        m.multiply(new THREE.Matrix4().makeTranslation(off[0], off[1], off[2]));
+      }
       mesh.matrixAutoUpdate = false;
       mesh.matrix.copy(m);
       mesh.matrixWorld.copy(m);
@@ -549,7 +584,7 @@ export class AssemblyScene {
   }
 
   /** 取景到显式包围盒（fitToIds / _fitCamera 共用）。 */
-  _fitCameraTo(box) {
+  _fitCameraTo(box, pad = 1) {
     const center = box.getCenter(new THREE.Vector3());
     const size = box.getSize(new THREE.Vector3());
     const maxDim = Math.max(size.x, size.y, size.z) || 1;
@@ -557,7 +592,17 @@ export class AssemblyScene {
     if (dir.lengthSq() < 1e-9) dir.set(1, 0.7, 1).normalize();
     this.controls.target.copy(center);
     // 窄视口（aspect < 1）时水平视野更小：按 aspect 收紧 fit 距离避免侧缘裁剪
-    const dist = maxDim * 1.8 / Math.min(1, Math.sqrt(this.camera.aspect || 1));
+    let dist = maxDim * 1.8 * pad / Math.min(1, Math.sqrt(this.camera.aspect || 1));
+    // 防止小零件被"适配屏幕"过度放大：相机不放到比整装配对角线的一定比例更近，
+    // 保留周围上下文，避免半个螺母充满全屏。
+    if (!this.bbox.isEmpty()) {
+      const diag = this.bbox.getSize(new THREE.Vector3()).length() || maxDim;
+      dist = Math.max(dist, diag * 0.12);
+    } else {
+      // 整装配 bbox 暂不可用时（如部分几何未载入），按零件自身尺寸兜底，
+      // 仍保证相机不贴到能把小件吹满屏的距离。
+      dist = Math.max(dist, maxDim * 12);
+    }
     this.camera.position.copy(center).addScaledVector(dir, dist);
     this.camera.near = Math.max(maxDim / 1000, 0.001);
     this.camera.far = maxDim * 100;
@@ -585,6 +630,9 @@ export class AssemblyScene {
         const nodeId = h.object.userData.nodeIds?.[h.instanceId];
         // ndc 一并传出：特征级拾取（pickFeatureAt）需要点击位置
         if (nodeId) this.pickHandler(nodeId, ndc.clone());
+      } else if (this.pickHandler) {
+        // 点空白（未命中任何零件）：传出 null，让页面清除当前选中
+        this.pickHandler(null, ndc.clone());
       }
     });
   }

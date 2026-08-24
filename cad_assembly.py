@@ -1142,6 +1142,66 @@ def apply_replace(target_shape, params, cache_root):
     return cad_core.translate_shape(src_shape, *d)
 
 
+def replaced_identity(steps: list, cache_root: str | None = None,
+                      cache_dir: str | None = None) -> dict:
+    """从 replace 步骤收集"被替换模板"的新零件名与对齐偏移。
+
+    遍历 ``replace`` 步骤（``params.source_cache_key + source_template_id``），
+    从来源 cache 的 manifest 读模板 ``name``；并依据目标/来源模板包围盒与
+    ``params.align`` 计算换件的对齐平移 ``offset``（与 apply_replace 同公式），
+    供前端草稿场景把特征 overlay 平移到新零件表面上（基线场景保持不动）。
+
+    返回 ``{target_tid: {name, source_cache_key, source_template_id, offset}}``。
+    ``offset`` 为 ``[dx, dy, dz]`` 或 None（目标/来源形状读不到时跳过偏移）。
+    名字读不到则该条整体跳过；``cache_root`` 缺省直接返回空。
+    """
+    out: dict = {}
+    if not cache_root:
+        return out
+    for s in steps:
+        if (s.get("operation") or "").lower() != "replace":
+            continue
+        params = s.get("params") or {}
+        src_key = str(params.get("source_cache_key") or "")
+        src_tid = str(params.get("source_template_id") or "")
+        tid = s.get("template_id")
+        if not src_key or not src_tid or not tid:
+            continue
+        name = None
+        try:
+            src_manifest = load_cache(os.path.join(cache_root, src_key))
+        except Exception:
+            src_manifest = None
+        if src_manifest:
+            for t in src_manifest.get("templates", []):
+                if t["id"] == src_tid:
+                    name = t.get("name")
+                    break
+        if not name:
+            continue
+        # 对齐平移：目标(=本 cache 里被换件模板形状) bbox → 来源 bbox，与 apply_replace 一致。
+        offset = None
+        if cache_dir:
+            try:
+                t_shape = cad_core.read_shape(
+                    os.path.join(cache_dir, "parts", f"{tid}.step"))
+                s_shape = cad_core.read_shape(
+                    os.path.join(cache_root, str(src_key), "parts", f"{src_tid}.step"))
+                t_bb = cad_core.properties(t_shape)["bounding_box"]
+                s_bb = cad_core.properties(s_shape)["bounding_box"]
+                d = align_translation(t_bb, s_bb, params.get("align", ALIGN_DEFAULT))
+                offset = [round(d[0] + float(params.get("dx", 0)), 3),
+                          round(d[1] + float(params.get("dy", 0)), 3),
+                          round(d[2] + float(params.get("dz", 0)), 3)]
+            except Exception:
+                offset = None
+        out[tid] = {
+            "name": name, "source_cache_key": src_key,
+            "source_template_id": src_tid, "offset": offset,
+        }
+    return out
+
+
 def replay_draft_shapes(cache_dir: str, manifest: dict, store,
                          steps: list, cache_root: str | None = None) -> dict:
     """Replay the draft's ordered step list over the baseline geometry.

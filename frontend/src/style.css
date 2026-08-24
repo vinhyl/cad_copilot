@@ -195,6 +195,7 @@ html, body {
   padding: 0 7px;
 }
 .badge.part { color: #8f9cff; }
+.badge.part.replaced { color: #6fd08c; border: 1px solid #2a5a3b; background: #1e3a26; }
 
 /* ---- 3D 视口 ---- */
 #viewport {
@@ -878,12 +879,53 @@ html, body {
 
 .steps-list { display: flex; flex-direction: column; gap: 6px; }
 .steps-list .empty { color: #a0a0aa; font-size: 12px; padding: 6px 4px; }
+.steps-head { margin-top: 6px; display: flex; flex-direction: column; gap: 2px; }
+.steps-title { font-size: 12px; font-weight: 600; color: #e6e6ea; }
 .step {
-  display: flex; align-items: center; gap: 8px;
+  display: flex; flex-direction: column; gap: 3px;
   padding: 6px 8px; border-radius: 6px;
   background: #26262e; border: 1px solid #33333c;
   font-size: 12px;
 }
+.step-top {
+  display: flex; align-items: center; gap: 8px;
+}
+.step-desc {
+  color: #a0a0aa; font-size: 11px;
+  white-space: normal; word-break: break-word; line-height: 1.35;
+}
+.step-type {
+  flex: none; padding: 0 6px; border-radius: 6px;
+  font-size: 11px; font-weight: 600; line-height: 16px;
+}
+.step-type.ty-move { background: #1c2f4a; color: #7fd0ff; }
+.step-type.ty-replace { background: #3a2f1e; color: #ffcf8f; }
+.step-type.ty-feature { background: #1e3a26; color: #8ff0a4; }
+.step-target {
+  flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; color: #e6e6ea;
+}
+/* 步骤搜索 */
+.step-search input {
+  width: 100%; box-sizing: border-box; background: #26262e;
+  border: 1px solid #3a3a44; color: #e6e6ea; border-radius: 6px;
+  padding: 5px 8px; font-size: 12px;
+}
+.step-search input:focus { border-color: #4b3fe3; outline: none; }
+.step-search-results {
+  margin-top: 4px; max-height: 260px; overflow: auto;
+  border: 1px solid #33333c; border-radius: 6px; background: #1e1e23;
+}
+.step-search-results[hidden] { display: none; }
+.src-hdr {
+  font-size: 11px; color: #a0a0aa; padding: 4px 8px;
+  background: #26262e; position: sticky; top: 0;
+}
+.src-row {
+  font-size: 12px; color: #e6e6ea; padding: 5px 8px; cursor: pointer;
+  border-top: 1px solid #26262e;
+}
+.src-row:hover { background: #2b2b35; color: #cfd8ff; }
 .step .no {
   width: 18px; height: 18px; border-radius: 999px;
   background: #1c1759; color: #cfd8ff;
@@ -913,7 +955,28 @@ html, body {
 }
 .sf-title { font-size: 12px; font-weight: 600; color: #e6e6ea; }
 .sf-row { display: flex; flex-direction: column; gap: 3px; }
+.sf-row[hidden] { display: none; }   /* 覆盖 .sf-row 的 flex，让 hidden 真正生效 */
 .sf-row label { font-size: 11px; color: #a0a0aa; }
+/* 操作域分段（零件编辑 / 装配操作） */
+.sf-domain { display: flex; gap: 4px; }
+.sf-domain button {
+  flex: 1; padding: 4px 0; font-size: 12px; cursor: pointer;
+  background: #26262e; color: #a0a0aa;
+  border: 1px solid #3a3a44; border-radius: 6px;
+}
+.sf-domain button.active { background: #4b3fe3; border-color: #4b3fe3; color: #fff; font-weight: 600; }
+/* 装配目标实例条（3D 点选） */
+.sf-target {
+  font-size: 12px; color: #cfd8ff; background: #26262e;
+  border: 1px solid #33333c; border-radius: 6px; padding: 4px 8px;
+}
+.sf-target.warn { color: #ffcf8f; border-color: #5a4530; }
+.target-row .sf-target { min-height: 20px; }
+/* 装配步骤行（换件/移动）在步骤列表里的强调 */
+.step.step-assembly { border-color: #3a3a55; background: #242434; }
+/* 归并后的步骤组行（如"移动 31 件"）：虚线 + 标题强调 */
+.step.step-group { border-style: dashed; background: #2b2a3a; }
+.step.step-group .step-title { font-weight: 600; color: #cfd8ff; }
 .step-form select,
 .sf-params input {
   background: #26262e; border: 1px solid #3a3a44; color: #e6e6ea;

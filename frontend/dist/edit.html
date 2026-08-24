@@ -4,10 +4,10 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>CAD Copilot · 编辑会话</title>
-    <script type="module" crossorigin src="/app/assets/edit-DyeKRD4e.js"></script>
-    <link rel="modulepreload" crossorigin href="/app/assets/utils-RUfPEJc5.js">
-    <link rel="modulepreload" crossorigin href="/app/assets/tree-txvd7BGv.js">
-    <link rel="stylesheet" crossorigin href="/app/assets/utils-BDcwyAhm.css">
+    <script type="module" crossorigin src="/app/assets/edit-DZoVNTFZ.js"></script>
+    <link rel="modulepreload" crossorigin href="/app/assets/utils-BlgT2PIf.js">
+    <link rel="modulepreload" crossorigin href="/app/assets/tree-B8_A2mfF.js">
+    <link rel="stylesheet" crossorigin href="/app/assets/utils-C6beiXP-.css">
   </head>
   <body>
     <div id="app" class="page-edit">
@@ -27,24 +27,30 @@
       <div id="edit-ws" class="edit-ws layout-split-h">
         <aside class="rail rail-left">
           <div class="rail-head">
-            <span class="rail-title">草稿步骤</span>
+            <span class="rail-title">编辑</span>
             <button id="rail-toggle" title="收起/展开侧栏">›</button>
           </div>
           <div class="rail-body steps">
-            <div class="rail-hint">声明式步骤表：多目标 · 可增删。每步变更触发草稿重放 + 增量干涉检查。</div>
-            <div id="steps-list" class="steps-list"></div>
+            <div class="step-search">
+              <input id="step-search" type="search" placeholder="搜索：模板/零件（如 t29、NAUO32、130mLl）…" autocomplete="off" />
+              <div id="step-search-results" class="step-search-results"></div>
+            </div>
             <div id="step-form" class="step-form">
               <div class="sf-title">添加编辑步骤</div>
               <div class="sf-row">
+                <label>操作域</label>
+                <div class="sf-domain" id="sf-domain">
+                  <button type="button" data-domain="part" class="active">零件编辑</button>
+                  <button type="button" data-domain="assembly">装配操作</button>
+                </div>
+              </div>
+              <div class="sf-row target-row" id="sf-target-row">
+                <label>目标（3D 点选，两域通用）</label>
+                <div id="sf-target" class="sf-target">— 请在 3D 视口点击选中一个零件 —</div>
+              </div>
+              <div class="sf-row" id="sf-template-row">
                 <label for="sf-template">目标模板</label>
                 <select id="sf-template"></select>
-              </div>
-              <div class="sf-row">
-                <label for="sf-granularity">编辑粒度</label>
-                <select id="sf-granularity">
-                  <option value="template">整模板</option>
-                  <option value="feature">定点特征</option>
-                </select>
               </div>
               <div class="sf-row" id="sf-feature-row" hidden>
                 <label for="sf-feature">目标特征</label>
@@ -58,6 +64,11 @@
               <div id="sf-hint" class="sf-hint"></div>
               <button id="btn-add-step" class="step-add">＋ 添加步骤到草稿</button>
             </div>
+            <div class="steps-head">
+              <div class="steps-title">草稿步骤</div>
+              <div class="rail-hint">声明式步骤表：多目标 · 可增删。每步变更触发草稿重放 + 增量干涉检查。</div>
+            </div>
+            <div id="steps-list" class="steps-list"></div>
           </div>
         </aside>
 

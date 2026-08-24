@@ -490,7 +490,10 @@ def create_app(token: str | None = None,
             return JSONResponse({"error": "forbidden"}, status_code=403)
         if not os.path.isfile(fp):
             return JSONResponse({"error": "not found"}, status_code=404)
-        return FileResponse(fp)
+        # 特征数据/overlay 几何随换件、版本编辑变化：禁缓存，避免浏览器命中旧内容
+        rel = request.path_params["rest"] or ""
+        headers = {"Cache-Control": "no-cache"} if "/features/" in f"/{rel}" else {}
+        return FileResponse(fp, headers=headers)
 
     # ----------------------------------------------------------------------
     # Phase C: edit (interference-gated) + version management (D10)
@@ -887,7 +890,7 @@ def create_app(token: str | None = None,
                     # 否则删光步骤的 preview 会退化为全量 O(n²) 布尔
                     # 检查（62 模板实测 ~5 分钟）
                     if not steps:
-                        return {}, {}, [], {"per_template": [], "totals": {}}, manifest
+                        return {}, {}, [], {"per_template": [], "totals": {}}, manifest, {}
                     # 1) move 步骤解析+校验提前（未命中 node_id 直接
                     # ValueError 400，不再先花 ~7s 加载全模板形状）
                     moves = cad_assembly.moves_from_steps(steps)
@@ -934,8 +937,16 @@ def create_app(token: str | None = None,
                                 os.path.join(preview_dir, f"{t['id']}.gltf"),
                                 os.path.dirname(drafts_root))
                             t["gltf"] = "/" + rel.replace(os.sep, "/")
-                    return (edited_shapes, moves, hits, diff, draft_manifest)
-            edited_shapes, moves, hits, diff, draft_manifest = \
+                    # 5b) 换件身份：被替换模板改显示名（新零件），返回 replaced 映射。
+                    # 特征数据/overlay 由前端重指向来源 cache，不再拷贝进目标缓存
+                    replaced = cad_assembly.replaced_identity(steps, cache_root, cache_dir)
+                    if replaced:
+                        for t in draft_manifest["templates"]:
+                            if t["id"] in replaced:
+                                t["name"] = replaced[t["id"]]["name"]
+                    return (edited_shapes, moves, hits, diff, draft_manifest,
+                            replaced)
+            edited_shapes, moves, hits, diff, draft_manifest, replaced = \
                 await run_in_threadpool(work)
         except ValueError as e:
             return JSONResponse({"ok": False, "error": str(e),
@@ -954,6 +965,7 @@ def create_app(token: str | None = None,
             "check_level": level,
             "edited_templates": list(edited_shapes.keys()),
             "moved_nodes": list(moves.keys()),
+            "replaced": replaced,       # 被替换模板的新零件名（Phase2 换件身份）
             "diff": diff,
         })
 

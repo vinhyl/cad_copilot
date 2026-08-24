@@ -120,6 +120,11 @@ export class AssemblyTree {
       const badge = document.createElement('span');
       badge.className = 'badge part';
       badge.textContent = '零件';
+      // 换件后的新零件：节点标「已替换」（node.replaced 由换件身份逻辑标记）
+      if (node.replaced) {
+        badge.classList.add('replaced');
+        badge.textContent = '已替换';
+      }
       row.append(cb, label, badge);
       wrap.append(row);
     }

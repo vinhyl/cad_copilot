@@ -62,6 +62,10 @@ const state = {
   // 精检结果跨刷新保留（逐处处理干涉时不因步骤改动即丢失）
   exactResult: null,   // 最近一次精检结果（保持显示，直到手动重置/重新精检）
   verifyStale: false,  // 步骤改动后，已存精检结果对未来几何已过期
+  // 装配级编辑：操作域（领域 A 零件编辑 / 领域 B 装配操作）+ 目标实例 + 换件身份
+  opDomain: 'part',                 // 'part'（零件编辑）| 'assembly'（装配操作）
+  targetInstance: { nodeId: null, templateId: null },  // 3D 点选选中的实例
+  replacedMap: {},                  // tid -> {name, source_cache_key}（换件后新零件名）
 };
 
 // ==========================================================================
@@ -108,8 +112,14 @@ async function loadBaseline() {
       statusFn(`已恢复草稿（${state.draftSteps.length} 步，基线 ${d.baseline_version || curVersion}）`);
       renderDraftSteps();
       // 优先恢复上次精检结果（步序未变）；有则跳过本次自动 bbox 预览，
-      // 无则照常自动触发一次 preview 把草稿几何 + 干涉刷出来
-      if (!tryRestoreExact()) schedulePreview();
+      // 无则照常自动触发一次 preview 把草稿几何 + 干涉刷出来。
+      // 即便恢复了精检，若换件身份信息缺失（旧缓存无 replaced），仍补一次
+      // preview 刷新新零件名并保证几何/身份与当前步骤一致。
+      if (tryRestoreExact()) {
+        if (!replacedInfoComplete()) schedulePreview();
+      } else {
+        schedulePreview();
+      }
     } else {
       renderDraftSteps();
       statusFn(`已锁定基线 ${curVersion}：${manifest.source_file}`);
@@ -237,15 +247,26 @@ function normalizeStep(s) {
   };
 }
 
-/** 前端兜底标题（后端 draft_step_title 的镜像，move 用节点名）。 */
+/** 前端兜底标题（后端 draft_step_title 的镜像，move/replace 用节点名）。 */
 function stepFallbackTitle(s) {
+  const p = s.params || {};
   if (s.operation === 'move') {
-    const p = s.params || {};
-    const rec = treeBaseline.nodes.get(s.node_id);
-    const name = rec?.node?.name || s.node_id;
+    const name = stepNodeName(s.node_id, s.template_id);
     return `${name}: move Δ(${p.dx ?? 0},${p.dy ?? 0},${p.dz ?? 0}) mm`;
   }
-  return `${s.template_id}: ${s.operation}`;
+  if (s.operation === 'replace') {
+    const name = stepNodeName(s.node_id, s.template_id);
+    return `${name}: 换件 来源 ${String(p.source_cache_key || '?').slice(0, 6)}/${p.source_template_id || '?'}`;
+  }
+  return `${tplDisplayName(s.template_id, s.template_id)}: ${s.operation}`;
+}
+
+/** 装配步骤节点显示名（move/replace 的 node_id 优先，其次换件后模板名）。 */
+function stepNodeName(nodeId, templateId) {
+  const rec = nodeId ? treeBaseline.nodes.get(nodeId) : null;
+  const nodeName = rec?.node?.name;
+  if (nodeName) return nodeName;
+  return tplDisplayName(templateId, templateId);
 }
 
 /** M6.5：把草稿视口的一次拖拽位移折算进步骤表。
@@ -291,6 +312,52 @@ function commitTempMovesToSteps() {
   }
 }
 
+/** 步骤卡片统一数据：每张卡都按「类型 / 目标 / 详情」三段展示，保证各步骤风格一致。
+ * 目标统一为可读名字 + 层级前缀：换件/特征是「类 <名>」，移动是「件 <名>」——
+ * 换件改整类、移动改这一个实例，差异是语义使然而非混乱。 */
+function stepCardData(s) {
+  const p = s.params || {};
+  if (s.operation === 'move') {
+    return {
+      kind: 'move', type: '移动',
+      target: `件 ${stepNodeName(s.node_id, s.template_id)}`,
+      detail: `Δ(${p.dx ?? 0}, ${p.dy ?? 0}, ${p.dz ?? 0})mm`,
+    };
+  }
+  if (s.operation === 'replace') {
+    return {
+      kind: 'replace', type: '换件',
+      target: `类 ${tplDisplayName(s.template_id, s.template_id)}`,
+      detail: `对齐=${p.align || 'base'}`,
+    };
+  }
+  const opLabel = (FEATURE_OPS[s.operation] || {}).label || s.operation;
+  const target = `类 ${tplDisplayName(s.template_id, s.template_id)}`;
+  const detail = s.feature_id ? `特征 ${s.feature_id}` : '';
+  return { kind: 'feature', type: opLabel, target, detail };
+}
+
+/** 步骤分组键：仅同类且（move 用完全相同位移；replace 相同来源/对齐）可合并。
+ * 几何/特征步骤是串行累积，不分组。 */
+function stepGroupKey(s) {
+  const p = s.params || {};
+  if (s.operation === 'move') return `move:${p.dx ?? 0}:${p.dy ?? 0}:${p.dz ?? 0}`;
+  if (s.operation === 'replace') return `replace:${p.source_cache_key}:${p.source_template_id}:${p.align}`;
+  return `${s.operation}:${s.template_id}:${s.feature_id || ''}`;
+}
+
+/** 连续同键的 move 归并成一组（一行显示，避免 31 条同名 move 刷屏）。 */
+function groupSteps(steps) {
+  const runs = [];
+  for (const s of steps) {
+    const k = stepGroupKey(s);
+    const last = runs[runs.length - 1];
+    if (last && last.key === k && s.operation === 'move') last.items.push(s);
+    else runs.push({ key: k, items: [s] });
+  }
+  return runs;
+}
+
 function renderDraftSteps(targetBox) {
   const box = targetBox || $('#steps-list');
   box.innerHTML = '';
@@ -302,64 +369,93 @@ function renderDraftSteps(targetBox) {
     box.appendChild(ph);
     return;
   }
-  state.draftSteps.forEach((s, i) => {
-    const row = document.createElement('div'); row.className = 'step';
-    const no = document.createElement('span'); no.className = 'no'; no.textContent = `${i + 1}`;
-    const tt = document.createElement('span'); tt.className = 'step-title';
-    tt.textContent = s.title || stepFallbackTitle(s);
-    const meta = document.createElement('span'); meta.className = 'step-meta';
-    meta.textContent = s.operation === 'move'
-      ? `${s.node_id} · move`
-      : `${s.template_id} · ${s.operation}`;
+  let shown = 0;
+  for (const run of groupSteps(state.draftSteps)) {
+    if (run.items.length === 1) {
+      box.appendChild(buildStepRow(run.items[0], shown + 1));
+      shown += 1;
+      continue;
+    }
+    // 分组行：连续同位移的多个 move → 统一卡片「类型/目标/详情」
+    const p = run.items[0].params || {};
+    const row = document.createElement('div');
+    row.className = 'step step-assembly step-group';
+    const top = document.createElement('div'); top.className = 'step-top';
+    const no = document.createElement('span'); no.className = 'no';
+    no.textContent = `${shown + 1}–${shown + run.items.length}`;
+    const badge = document.createElement('span'); badge.className = 'step-type ty-move'; badge.textContent = '移动';
+    const target = document.createElement('span'); target.className = 'step-target'; target.textContent = `${run.items.length} 件`;
+    const names = run.items.map((s) => stepNodeName(s.node_id, s.template_id));
+    const desc = document.createElement('div'); desc.className = 'step-desc';
+    desc.textContent = `Δ(${p.dx ?? 0}, ${p.dy ?? 0}, ${p.dz ?? 0})mm · ${names.join('、')}`;
     const del = document.createElement('button'); del.className = 'del'; del.textContent = '×';
-    del.title = '删除此步骤';
-    del.addEventListener('click', () => {
-      state.draftSteps.splice(i, 1);
+    del.title = '删除这一组步骤';
+    del.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const start = state.draftSteps.indexOf(run.items[0]);
+      if (start >= 0) state.draftSteps.splice(start, run.items.length);
       state.dirty = true;
       markFeaStale();
       renderDraftSteps();
       updateSessionHeader();
       schedulePreview();
     });
-    row.append(no, tt, meta, del);
+    top.append(no, badge, target, del);
+    row.append(top, desc);
     box.appendChild(row);
-  });
+    shown += run.items.length;
+  }
   // 镜像到窄屏抽屉
   if (box.id === 'steps-list' && $('#drawer-steps')) {
     renderDraftSteps($('#drawer-steps'));
   }
 }
 
+/** 渲染单条步骤（未归并）。所有步骤统一卡片：顶行[序号|类型|目标|删除] + 描述行(详情)。 */
+function buildStepRow(s, ordinal) {
+  const cd = stepCardData(s);
+  const row = document.createElement('div'); row.className = 'step';
+  const isAssembly = s.node_id && (s.operation === 'move' || s.operation === 'replace');
+  if (isAssembly) row.classList.add('step-assembly');
+  const top = document.createElement('div'); top.className = 'step-top';
+  const no = document.createElement('span'); no.className = 'no'; no.textContent = `${ordinal}`;
+  const badge = document.createElement('span'); badge.className = `step-type ty-${cd.kind}`; badge.textContent = cd.type;
+  const target = document.createElement('span'); target.className = 'step-target'; target.textContent = cd.target;
+  const del = document.createElement('button'); del.className = 'del'; del.textContent = '×';
+  del.title = '删除此步骤';
+  del.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const idx = state.draftSteps.indexOf(s);
+    if (idx >= 0) state.draftSteps.splice(idx, 1);
+    state.dirty = true;
+    markFeaStale();
+    renderDraftSteps();
+    updateSessionHeader();
+    schedulePreview();
+  });
+  top.append(no, badge, target, del);
+  row.append(top);
+  if (cd.detail) {
+    const desc = document.createElement('div'); desc.className = 'step-desc';
+    desc.textContent = cd.detail;
+    row.append(desc);
+  }
+  // 装配步骤：点击卡片定位到该实例（双视口取景）
+  if (isAssembly && s.node_id) {
+    row.title = '点击定位到该零件';
+    row.addEventListener('click', (e) => {
+      if (e.target.closest('.del')) return;
+      sceneBaseline.fitToIds([s.node_id]);
+      if (!camSync) sceneDraft.fitToIds([s.node_id]);
+    });
+  }
+  return row;
+}
+
 // ==========================================================================
 // M3：操作表单（目标模板 → 粒度 → 特征 → 操作 → 参数 级联）
 // 操作契约与后端 apply_template_edit / apply_feature_edit 一一对应
 // ==========================================================================
-
-const TEMPLATE_OPS = {
-  drill: {
-    label: '钻孔', fields: [
-      { key: 'radius', label: '半径 R (mm)', type: 'number', def: 1.5, min: 0.05, step: 0.05 },
-      { key: 'depth', label: '深度 (mm)', type: 'number', def: 5, min: 0.05, step: 0.05 },
-      { key: 'position', label: '位置 x,y,z（模板局部）', type: 'vec3', def: '0,0,0' },
-      { key: 'direction', label: '方向 x,y,z', type: 'vec3', def: '0,0,1' },
-    ],
-  },
-  fillet: {
-    label: '倒圆（全部边）', fields: [
-      { key: 'radius', label: '圆角半径 R (mm)', type: 'number', def: 0.5, min: 0.05, step: 0.05 },
-    ],
-  },
-  chamfer: {
-    label: '倒角（全部边）', fields: [
-      { key: 'distance', label: '倒角距离 (mm)', type: 'number', def: 0.5, min: 0.05, step: 0.05 },
-    ],
-  },
-  scale: {
-    label: '整体缩放', fields: [
-      { key: 'factor', label: '缩放系数', type: 'number', def: 1.1, min: 0.01, step: 0.01 },
-    ],
-  },
-};
 
 const FEATURE_OPS = {
   hole_resize: {
@@ -374,20 +470,63 @@ const FEATURE_OPS = {
   },
 };
 
+// 领域 B · 装配操作（实例级：针对 3D 点选的单个零件实例）。
+// replace/move 步骤带 node_id；template_id 为实例解引用（后端 replay 用）。
+const ASSEMBLY_OPS = {
+  replace: {
+    label: '换件（用其它文件零件）', instance: true,
+    fields: [
+      { key: 'source', label: '来源零件', type: 'source', hint: '从另一已打开文件选中的零件' },
+      { key: 'align', label: '对齐方式', type: 'align', def: 'base' },
+      { key: 'dx', label: 'X 偏移 (mm)', type: 'num', def: 0 },
+      { key: 'dy', label: 'Y 偏移 (mm)', type: 'num', def: 0 },
+      { key: 'dz', label: 'Z 偏移 (mm)', type: 'num', def: 0 },
+    ],
+  },
+  move: {
+    label: '移动（dx/dy/dz 绝对位移）', instance: true,
+    fields: [
+      { key: 'dx', label: 'X (mm)', type: 'num', def: 0 },
+      { key: 'dy', label: 'Y (mm)', type: 'num', def: 0 },
+      { key: 'dz', label: 'Z (mm)', type: 'num', def: 0 },
+    ],
+  },
+};
+
 function setFormHint(text, level = 'info') {
   const el = $('#sf-hint');
   el.className = `sf-hint ${level === 'info' ? '' : level}`.trim();
   el.textContent = text;
 }
 
+function currentDomain() {
+  return state.opDomain;   // 'part'（零件编辑=定点特征）| 'assembly'（装配操作）
+}
+
+/** 零件编辑统一为特征级编辑（已去掉"整件"层）。 */
 function currentGranularity() {
-  return $('#sf-granularity').value;   // 'template' | 'feature'
+  return 'feature';
 }
 
 function currentOpDef() {
   const key = $('#sf-operation').value;
-  if (currentGranularity() === 'feature') return FEATURE_OPS[key];
-  return TEMPLATE_OPS[key];
+  if (currentDomain() === 'assembly') return ASSEMBLY_OPS[key];
+  return FEATURE_OPS[key];
+}
+
+/** 目标实例的显示名（换件后取新零件名；否则取装配树节点名）。 */
+function targetInstanceName() {
+  const { nodeId, templateId } = state.targetInstance;
+  if (!nodeId && !templateId) return '';
+  const rec = nodeId ? treeBaseline.nodes.get(nodeId) : null;
+  const nodeName = rec?.node?.name || (nodeId ? nodeId : '');
+  const replaced = state.replacedMap[templateId];
+  const name = replaced?.name || nodeName || '';
+  const clsName = templateId ? tplDisplayName(templateId, templateId) : '';
+  const parts = [];
+  if (name) parts.push(name);
+  if (clsName && clsName !== name) parts.push(`类${clsName}`);
+  return parts.join(' · ');
 }
 
 function currentFeatures() {
@@ -411,8 +550,10 @@ function renderOperations() {
   const sel = $('#sf-operation');
   const key = sel.value;   // 尽量保持当前选择
   sel.innerHTML = '';
-  let ops = TEMPLATE_OPS;
-  if (currentGranularity() === 'feature') {
+  let ops = {};
+  if (currentDomain() === 'assembly') {
+    ops = ASSEMBLY_OPS;
+  } else {
     const feat = currentFeature();
     ops = feat ? featureOpsFor(feat) : {};
     if (feat && !Object.keys(ops).length) {
@@ -428,11 +569,30 @@ function renderOperations() {
   renderParams();
 }
 
+/** 从「其它已打开文件」读被选中的零件，作为换件来源（排除当前 cache_key）。 */
+async function loadReplaceSources() {
+  try {
+    const r = await fetch(`/api/selection?all=1`, {
+      headers: { Authorization: `Bearer ${getToken()}` },
+    });
+    if (!r.ok) return [];
+    const data = await r.json();
+    const items = data?.selections || [];
+    return items.filter((s) => s.cache_key && s.cache_key !== state.cacheKey)
+      .map((s) => ({ cache_key: s.cache_key, template_id: s.template_id, node_id: s.node_id, name: s.template_name || s.node_name || s.node_id }));
+  } catch { return []; }
+}
+
 function renderParams() {
   const box = $('#sf-params');
   box.innerHTML = '';
   const def = currentOpDef();
   if (!def) return;
+  // 装配操作：来源选择 + 对齐下拉 + 数值偏移
+  if (currentDomain() === 'assembly') {
+    renderAssemblyParams(box, def);
+    return;
+  }
   const feat = currentGranularity() === 'feature' ? currentFeature() : null;
   for (const f of def.fields) {
     const row = document.createElement('div'); row.className = 'sf-row';
@@ -467,9 +627,80 @@ function renderParams() {
   }
 }
 
+/** 装配操作域的参数渲染（当前目标实例 + replace 来源/对齐 + move dx/dy/dz）。 */
+function renderAssemblyParams(box, def) {
+  // 目标实例状态条（只读）
+  const target = document.createElement('div');
+  target.className = 'sf-target'; target.id = 'sf-p-target';
+  const { nodeId } = state.targetInstance;
+  if (!nodeId) {
+    target.textContent = '⚠ 未选中零件：请先在 3D 视口点击要操作的零件';
+    target.classList.add('warn');
+  } else {
+    target.textContent = `目标：${targetInstanceName()}`;
+  }
+  box.appendChild(target);
+
+  for (const f of def.fields) {
+    if (f.type === 'source') {
+      const row = document.createElement('div'); row.className = 'sf-row';
+      const lab = document.createElement('label'); lab.textContent = f.label;
+      const sel = document.createElement('select'); sel.id = `sf-p-${f.key}`;
+      sel.innerHTML = '<option value="">（请先在其它文件选中零件）</option>';
+      row.append(lab, sel);
+      box.appendChild(row);
+      // 异步填充可换来源
+      loadReplaceSources().then((srcs) => {
+        if (!srcs.length) {
+          const o = document.createElement('option');
+          o.value = ''; o.textContent = '（未检测到其它文件选中的零件）';
+          sel.appendChild(o);
+          return;
+        }
+        srcs.forEach((s) => {
+          const o = document.createElement('option');
+          o.value = `${s.cache_key}::${s.template_id}::${s.node_id || ''}`;
+          o.textContent = `${s.name}（${s.cache_key.slice(0, 6)}…）`;
+          sel.appendChild(o);
+        });
+      });
+    } else if (f.type === 'align') {
+      const row = document.createElement('div'); row.className = 'sf-row';
+      const lab = document.createElement('label'); lab.textContent = f.label;
+      const sel = document.createElement('select'); sel.id = `sf-p-${f.key}`;
+      [['base', '底面对齐（加高版）'], ['top', '顶面对齐'], ['origin', '原点对齐'], ['center', '中心对齐'], ['seat', '接合面对齐']].forEach(([v, t]) => {
+        const o = document.createElement('option'); o.value = v; o.textContent = t;
+        sel.appendChild(o);
+      });
+      sel.value = f.def || 'base';
+      row.append(lab, sel);
+      box.appendChild(row);
+    } else if (f.type === 'num') {
+      const row = document.createElement('div'); row.className = 'sf-row';
+      const lab = document.createElement('label'); lab.textContent = f.label;
+      const input = document.createElement('input');
+      input.type = 'number'; input.step = 'any'; input.value = f.def ?? 0;
+      input.id = `sf-p-${f.key}`;
+      row.append(lab, input);
+      box.appendChild(row);
+    }
+  }
+}
+
 async function loadFeaturesFor(tid) {
   if (state.featuresCache.has(tid)) return state.featuresCache.get(tid);
   const tpl = state.baseline?.manifest?.templates.find((t) => t.id === tid);
+  // 换件后的模板：特征直接指向来源 cache（buffer 自洽，避免拷贝冲突/旧缓存）
+  const rep = state.replacedMap[tid];
+  if (rep?.source_cache_key && rep.source_template_id) {
+    const url = `/cache/${rep.source_cache_key}/features/${rep.source_template_id}.json`;
+    try {
+      const r = await fetch(url);
+      const feats = r.ok ? await r.json() : [];
+      state.featuresCache.set(tid, Array.isArray(feats) ? feats : []);
+    } catch { state.featuresCache.set(tid, []); }
+    return state.featuresCache.get(tid);
+  }
   if (!tpl?.features) {
     state.featuresCache.set(tid, []);
     return [];
@@ -488,15 +719,17 @@ async function renderFeatureOptions() {
   const row = $('#sf-feature-row');
   const sel = $('#sf-feature');
   const keep = sel.value;
-  row.hidden = currentGranularity() !== 'feature';
+  // 特征行只在「零件编辑」域显示；装配域（实例级操作）不出现目标特征
+  row.hidden = currentDomain() === 'assembly';
   if (row.hidden) return;
   sel.innerHTML = '';
+  // 占位项：未选特征时 currentFeature()=null，保证"零件级选中"与"特征级选中"互斥、数据不混淆
+  const ph = document.createElement('option');
+  ph.value = ''; ph.textContent = '（在某特征上点击选择）';
+  sel.appendChild(ph);
   const feats = await loadFeaturesFor(state.targetTemplateId);
   if (!feats.length) {
-    const o = document.createElement('option');
-    o.value = ''; o.textContent = '（该模板无特征数据）';
-    sel.appendChild(o);
-    setFormHint('该模板没有可编辑特征，可切换为整模板粒度', 'error');
+    setFormHint('该模板没有可编辑特征', 'error');
     return;
   }
   feats.forEach((f) => {
@@ -507,6 +740,7 @@ async function renderFeatureOptions() {
     sel.appendChild(o);
   });
   if (feats.some((f) => f.id === keep)) sel.value = keep;
+  else sel.value = '';   // keep 不可用 → 回到占位（未选特征）
   applyPendingFeature();   // pick 竞态兜底：列表就绪后应用特征级拾取结果
   syncFeatureHighlight();  // keep 恢复 / pending 应用后同步 3D 高亮
   // 预载特征 glTF（双视口）：点击模型面 → 特征级拾取联动即点即中
@@ -563,13 +797,46 @@ async function syncFeatureHighlight() {
   }
 }
 
+/** 更新操作域表单显隐 + 目标行 + 操作列表。
+ * 零件编辑=定点特征：模板/特征 行显示；装配操作域：只留目标行。 */
+function applyDomainFieldVisibility() {
+  const assembly = currentDomain() === 'assembly';
+  $('#sf-template-row').hidden = assembly;   // 目标模板：仅零件编辑域
+  $('#sf-feature-row').hidden = assembly;     // 目标特征：仅零件编辑域
+  $('#sf-target-row').hidden = false;         // 目标行：两域通用（跟随 3D）
+}
+
+function renderDomainForm() {
+  applyDomainFieldVisibility();
+  refreshTargetRow();
+  // 域切换后重渲染操作集；特征相关高亮仅在零件编辑域有意义
+  renderOperations();
+  if (currentDomain() !== 'assembly') syncFeatureHighlight();
+}
+
+function refreshTargetRow() {
+  const el = $('#sf-target');
+  if (el) el.textContent = targetInstanceName() || '— 请先在 3D 视口点击选择一个零件 —';
+}
+
+// 操作域分段切换
+document.querySelectorAll('#sf-domain button').forEach((b) => {
+  b.addEventListener('click', () => {
+    document.querySelectorAll('#sf-domain button').forEach((x) => x.classList.remove('active'));
+    b.classList.add('active');
+    state.opDomain = b.dataset.domain;
+    // 装甲装配域时，默认预选 move（不强制要求来源）；进入时目标行刷新
+    renderDomainForm();
+  });
+});
+
 function initStepForm() {
   const tplSel = $('#sf-template');
   tplSel.innerHTML = '';
   for (const t of state.baseline.manifest.templates) {
     const o = document.createElement('option');
     o.value = t.id;
-    o.textContent = `${t.name} (${t.id})`;
+    o.textContent = `${tplDisplayName(t.id, t.name)} (${t.id})`;
     tplSel.appendChild(o);
   }
   // 初始目标：URL scope 带入的模板优先
@@ -582,31 +849,125 @@ function initStepForm() {
 }
 
 $('#sf-template').addEventListener('change', (e) => setTargetTemplate(e.target.value));
-$('#sf-granularity').addEventListener('change', () => {
-  // 切到特征粒度：先异步载特征列表，载完由 renderFeatureOptions 内部渲染操作；
-  // 切回整模板粒度：直接重渲染操作
-  if (currentGranularity() === 'feature') renderFeatureOptions();
-  else renderOperations();
-  syncFeatureHighlight();
-});
 $('#sf-feature').addEventListener('change', () => {
   renderOperations();
   syncFeatureHighlight();
 });
 $('#sf-operation').addEventListener('change', () => renderParams());
 
+/** 模板显示名：换件后返回新零件名，否则原模板名。 */
+function tplDisplayName(tid, fallback) {
+  const rep = state.replacedMap[tid];
+  return rep?.name ? rep.name : (fallback || tid);
+}
+
+/** 应用换件身份到 draft：记录 replacedMap、给树节点改名/标「已替换」、刷新下拉与目标。
+ *  同时把被替换模板的「特征数据/overlay」重指向来源 cache（不拷贝进目标缓存，
+ *  避免 buffer 撞名与旧缓存问题）。还必须在本函数内、sceneDraft.load 之前完成。 */
+function applyDraftReplaced(res) {
+  if (res?.replaced) state.replacedMap = { ...state.replacedMap, ...res.replaced };
+  const mani = res?.manifest;
+  if (mani?.root && Object.keys(state.replacedMap).length) {
+    (function walk(n) {
+      if (n && n.type === 'part' && n.template) {
+        const rep = state.replacedMap[n.template];
+        if (rep?.name) n.name = rep.name;
+        if (rep) n.replaced = true;
+      }
+      (n.children || []).forEach(walk);
+    })(mani.root);
+    // 特征数据/overlay 重指向来源：manifest.features → 绝对源路径（scene._featureGltf 据此加载）
+    if (Array.isArray(mani.templates)) {
+      for (const t of mani.templates) {
+        const rep = state.replacedMap[t.id];
+        if (rep?.source_cache_key && rep.source_template_id) {
+          t.features = `/cache/${rep.source_cache_key}/features/${rep.source_template_id}.json`;
+        }
+      }
+    }
+    // 基线场景同模板也改指向来源，避免它读到目标缓存里被换件重写过的旧 tN 特征
+    if (state.baseline && Array.isArray(state.baseline.manifest?.templates)) {
+      for (const t of state.baseline.manifest.templates) {
+        const rep = state.replacedMap[t.id];
+        if (rep?.source_cache_key && rep.source_template_id) {
+          t.features = `/cache/${rep.source_cache_key}/features/${rep.source_template_id}.json`;
+        }
+      }
+    }
+  }
+  refreshTemplateLabels();
+  refreshTargetRow();
+  // 换件后该模板特征已重指向来源：清除旧缓存，目标被换件则重载特征列表/操作
+  const replacedTids = Object.keys(state.replacedMap).filter(
+    (tid) => res?.replaced?.[tid]);
+  if (replacedTids.length) {
+    replacedTids.forEach((tid) => {
+      state.featuresCache.delete(tid);
+      sceneBaseline.clearFeatureGltf(tid);
+      sceneDraft.clearFeatureGltf(tid);
+      // 草稿场景叠加换件对齐平移（overlay 贴到新零件）；基线场景不加（保持未平移参照）
+      const off = state.replacedMap[tid]?.offset;
+      sceneDraft.setOverlayOffset(tid, off || null);
+      sceneBaseline.setOverlayOffset(tid, null);
+    });
+    if (state.targetTemplateId && replacedTids.includes(state.targetTemplateId)) {
+      renderFeatureOptions();
+    }
+  }
+}
+
+/** 刷新模板下拉的显示名（换件后用新零件名），保持当前选中值不变。 */
+function refreshTemplateLabels() {
+  const sel = $('#sf-template');
+  if (!sel) return;
+  const cur = sel.value;
+  for (const opt of sel.options) {
+    const t = state.baseline?.manifest?.templates.find((t) => t.id === opt.value);
+    if (t) opt.textContent = `${tplDisplayName(t.id, t.name)} (${t.id})`;
+  }
+  if (cur) sel.value = cur;
+}
+
+/** 换件身份是否已就绪：每个 replace 步骤的模板都有新零件名。 */
+function replacedInfoComplete() {
+  const tidSet = new Set();
+  for (const s of state.draftSteps || []) {
+    if (s.operation === 'replace' && s.template_id) tidSet.add(s.template_id);
+  }
+  if (!tidSet.size) return true;
+  return [...tidSet].every((tid) => !!state.replacedMap[tid]?.name);
+}
+
+/** 放弃/删除草稿后清除换件身份，树/下拉/目标回到基线名。 */
+function resetDraftIdentity() {
+  state.replacedMap = {};
+  state.targetInstance = { nodeId: null, templateId: null };
+  sceneDraft.overlayOffsets.clear();   // 清除换件对齐偏移（overlay 回到未平移）
+  if (state.baseline) {
+    treeDraft.render(state.baseline.manifest.root);
+  }
+  refreshTemplateLabels();
+  refreshTargetRow();
+  renderDraftSteps();
+}
+
 $('#btn-add-step').addEventListener('click', () => {
   if (!state.baselineLoaded || !state.targetTemplateId) {
     setFormHint('等待基线加载…', 'error');
     return;
   }
-  const granularity = currentGranularity();
   const opKey = $('#sf-operation').value;
-  const def = granularity === 'feature' ? FEATURE_OPS[opKey] : TEMPLATE_OPS[opKey];
+  // 领域 B：装配操作（实例级）
+  if (currentDomain() === 'assembly') {
+    addAssemblyStep(opKey);
+    return;
+  }
+  // 领域 A：零件编辑 = 定点特征
+  const def = FEATURE_OPS[opKey];
   if (!def) { setFormHint('请先选择操作', 'error'); return; }
-  const feat = granularity === 'feature' ? currentFeature() : null;
-  if (granularity === 'feature' && !feat) {
-    setFormHint('请先选择目标特征', 'error');
+  const feat = currentFeature();
+  if (!feat) {
+    setFormHint('请先在 3D 视口点选零件上的一个特征', 'error');
     return;
   }
   // 参数收集与校验
@@ -630,18 +991,16 @@ $('#btn-add-step').addEventListener('click', () => {
       params[f.key] = v;
     }
   }
-  const tplName = state.baseline.manifest.templates
-    .find((t) => t.id === state.targetTemplateId)?.name || state.targetTemplateId;
+  const tplName = tplDisplayName(state.targetTemplateId,
+    state.baseline.manifest.templates.find((t) => t.id === state.targetTemplateId)?.name);
   stepSeq++;
   const step = normalizeStep({
     id: `s${Date.now()}_${stepSeq}`,
     template_id: state.targetTemplateId,
     operation: opKey,
     params,
-    ...(feat ? { feature_id: feat.id } : {}),
-    title: feat
-      ? `${tplName} ${feat.id}: ${def.label}`
-      : `${tplName}: ${def.label}`,
+    feature_id: feat.id,
+    title: `${tplName} ${feat.id}: ${def.label}`,
   });
   state.draftSteps.push(step);
   state.dirty = true;
@@ -651,6 +1010,67 @@ $('#btn-add-step').addEventListener('click', () => {
   setFormHint(`已添加：${step.title}`, 'ok');
   schedulePreview();
 });
+
+/** 领域 B：生成/覆盖一条装配级步骤（replace / move），作用于选中的实例。 */
+function addAssemblyStep(opKey) {
+  const { nodeId, templateId } = state.targetInstance;
+  if (!nodeId || !templateId) {
+    setFormHint('请先在 3D 视口点选目标零件', 'error');
+    return;
+  }
+  const def = ASSEMBLY_OPS[opKey];
+  if (!def) { setFormHint('请先选择操作', 'error'); return; }
+  const readNum = (key) => {
+    const el = document.getElementById(`sf-p-${key}`);
+    const v = el ? parseFloat(el.value) : 0;
+    return Number.isFinite(v) ? v : 0;
+  };
+  if (opKey === 'move') {
+    const params = { dx: readNum('dx'), dy: readNum('dy'), dz: readNum('dz') };
+    upsertAssemblyStep(nodeId, templateId, 'move', params,
+      `${targetInstanceName()}: move Δ(${params.dx},${params.dy},${params.dz}) mm`);
+    return;
+  }
+  // replace
+  const srcSel = document.getElementById('sf-p-source');
+  const src = srcSel?.value || '';
+  if (!src || !src.includes('::')) {
+    setFormHint('请先在其它文件选中一个零件作为换件来源', 'error');
+    return;
+  }
+  const [srcKey, srcTid] = src.split('::');
+  const params = {
+    source_cache_key: srcKey,
+    source_template_id: srcTid,
+    align: document.getElementById('sf-p-align')?.value || 'base',
+    dx: readNum('dx'), dy: readNum('dy'), dz: readNum('dz'),
+  };
+  upsertAssemblyStep(nodeId, templateId, 'replace', params,
+    `${targetInstanceName()}: 换件 ← 来源 ${srcKey.slice(0, 6)}/${srcTid}`);
+}
+
+/** 同实例装配步骤后写覆盖（replace/move 各一条）。 */
+function upsertAssemblyStep(nodeId, templateId, operation, params, title) {
+  const i = state.draftSteps.findIndex(
+    (s) => s.operation === operation && s.node_id === nodeId);
+  const base = i >= 0 ? state.draftSteps[i] : null;
+  const step = normalizeStep({
+    id: base?.id || `s${Date.now()}_${++stepSeq}`,
+    template_id: templateId,
+    node_id: nodeId,
+    operation,
+    params,
+    title,
+  });
+  if (base) { state.draftSteps[i] = step; }
+  else { state.draftSteps.push(step); }
+  state.dirty = true;
+  markFeaStale();
+  renderDraftSteps();
+  updateSessionHeader();
+  setFormHint(`已${base ? '更新' : '添加'}：${title}`, 'ok');
+  schedulePreview();
+}
 
 // ==========================================================================
 // 草稿重放 + 增量干涉（自动）
@@ -688,6 +1108,7 @@ async function runPreview(level = 'bbox') {
     const res = await previewDraft(state.cacheKey, stepsAtRequest, level);
     if (stepsAtRequest !== state.draftSteps) return;   // 期间被放弃/替换：丢弃过期响应
     state.lastPreview = res;
+    applyDraftReplaced(res);   // 换件身份：replacedMap + 树改名/「已替换」标记
     if (res?.manifest) {
       // 草稿场景刷新到草稿几何（实例重建后需重应用范围过滤 + 目标高亮）。
       // 被编辑模板是 /drafts/ 绝对路径，未编辑模板是 cache 相对路径 → base_url
@@ -755,9 +1176,11 @@ function draftStepsHash(steps) {
 function saveExactResult(res) {
   if (res?.check_level !== 'exact' || !state.cacheKey) return;
   try {
+    // 把步骤哈希写入结果自身：恢复/保留精检时用它精确判定是否过期
+    const hashed = { ...res, _hash: draftStepsHash(state.draftSteps) };
     sessionStorage.setItem(
       VERIFY_STORE_PREFIX + state.cacheKey,
-      JSON.stringify({ hash: draftStepsHash(state.draftSteps), res }),
+      JSON.stringify({ hash: hashed._hash, res: hashed }),
     );
   } catch (_) { /* 存储满/禁用：静默忽略，回退为不保留 */ }
 }
@@ -790,11 +1213,10 @@ function tryRestoreExact() {
   if (res?.check_level !== 'exact') return false;
   state.lastPreview = res;
   state.exactResult = res;
-  if (entry.hash !== draftStepsHash(state.draftSteps)) {
-    state.verifyStale = true;   // 步序已变：结果对未来几何过期，但先不丢
-  } else {
-    state.verifyStale = false;
-  }
+  applyDraftReplaced(res);   // 恢复换件身份（树改名/「已替换」/下拉）
+  // 过期判定：以结果自身携带的步骤哈希为准（精确，不因后续 bbox 误标）
+  const curHash = draftStepsHash(state.draftSteps);
+  state.verifyStale = !!(res._hash && res._hash !== curHash);
   const restorePane = () => {
     renderVerify(res);
     const n = (res.interferences || []).length;
@@ -828,10 +1250,12 @@ function renderVerify(res) {
     saveExactResult(res);
   } else if (state.exactResult?.check_level === 'exact') {
     // bbox 粗筛（步骤改动后的自动预览）到来时，已有精检结果 → 不覆盖丢弃，
-    // 继续展示精检列表（逐处处理干涉不丢），仅标记过期；几何已由调用方先行刷新
-    state.verifyStale = true;
+    // 继续展示精检列表（逐处处理干涉不丢）；仅按其步骤哈希精确标记过期
     res = state.exactResult;
-  }
+    state.verifyStale = !!(res._hash && res._hash !== draftStepsHash(state.draftSteps));
+} else {
+    state.verifyStale = false;
+}
   const hits = res?.interferences || [];
   const edited = res?.edited_templates || [];
   const isExact = res?.check_level === 'exact'
@@ -1204,6 +1628,7 @@ $('#sess-abandon').addEventListener('click', async () => {
   state.feaResult = null;
   state.feaStale = false;
   clearExactResult();
+  resetDraftIdentity();   // 清除换件身份（replacedMap/树标记/下拉）
   renderDraftSteps();
   renderVerify({ interferences: [], edited_templates: [] });
   updateSessionHeader();
@@ -1426,6 +1851,110 @@ document.querySelectorAll('.cam-bm').forEach((b) => {
 });
 
 // ==========================================================================
+// 步骤搜索：按模板id/模板名/零件名查找模板与零件概要，点击在模型上高亮并取景
+// ==========================================================================
+function searchTemplates(q) {
+  if (!q || !state.baseline?.manifest?.templates) return [];
+  const lq = q.toLowerCase();
+  const out = [];
+  for (const t of state.baseline.manifest.templates) {
+    const id = String(t.id);
+    const name = tplDisplayName(t.id, t.name || id);
+    if (id.toLowerCase().includes(lq) || name.toLowerCase().includes(lq)) {
+      out.push({ kind: 'template', id: t.id, label: `${name} (${t.id})` });
+    }
+  }
+  return out;
+}
+
+function searchParts(q) {
+  if (!q) return [];
+  const lq = q.toLowerCase();
+  const out = [];
+  for (const [nid, rec] of treeBaseline.nodes) {
+    if (rec.node.type !== 'part') continue;
+    const nm = String(rec.node.name || '');
+    const tid = rec.node.template;
+    const tidRep = tid ? tplDisplayName(tid, tid) : '';
+    if (nm.toLowerCase().includes(lq) || String(nid).toLowerCase().includes(lq)
+        || (tidRep && tidRep.toLowerCase().includes(lq))) {
+      out.push({ kind: 'part', nodeId: nid, templateId: tid, label: nm || nid });
+    }
+  }
+  return out;
+}
+
+/** 渲染搜索结果：模板组 + 零件组；点击高亮并取景。 */
+function renderSearch(query) {
+  const box = $('#step-search-results');
+  if (!box) return;
+  box.innerHTML = '';
+  const q = (query || '').trim();
+  if (!q || !state.baselineLoaded) { box.hidden = true; return; }
+  const tmpls = searchTemplates(q);
+  const parts = searchParts(q);
+  const highlightAndFit = (ids, label) => {
+    if (!ids || !ids.length) return;
+    // 先把视图焦点设到目标零件：让「子装配/零件」视图范围按它计算生效
+    state.focus = { level: 'part', nodeId: ids[0] };
+    updateRangeButtons();
+    reapplyViewFilter();          // 应用该焦点的范围可见性（同时清除旧高亮）
+    // 同步编辑区「目标」到该零件：让装配目标/零件编辑的模板/特征都跟随搜索
+    const tId0 = sceneBaseline.templateOf(ids[0]);
+    state.targetInstance = { nodeId: ids[0], templateId: tId0 || null };
+    treeBaseline.select(ids[0]);
+    treeDraft.select(ids[0]);
+    if (tId0) setTargetTemplate(tId0);
+    refreshTargetRow();
+    renderParams();
+    sceneBaseline.highlight(new Set(ids));
+    sceneDraft.highlight(new Set(ids));
+    // 搜索取景略远一点（留些余量），避免贴得太近
+    sceneBaseline.fitToIds(ids, 1.35);
+    if (!camSync) sceneDraft.fitToIds(ids, 1.35);
+    statusFn(`搜索 → 高亮 ${label}`);
+  };
+  const addHeader = (txt) => {
+    const h = document.createElement('div'); h.className = 'src-hdr'; h.textContent = txt;
+    box.appendChild(h);
+  };
+  const addRow = (label, onClick) => {
+    const r = document.createElement('div'); r.className = 'src-row'; r.textContent = label;
+    r.addEventListener('click', onClick);
+    box.appendChild(r);
+  };
+  if (tmpls.length) {
+    addHeader(`模板 ${tmpls.length}`);
+    tmpls.forEach((t) => {
+      const ids = [...sceneBaseline.instances.keys()].filter(
+        (id) => sceneBaseline.templateOf(id) === t.id);
+      addRow(`类 ${t.label}`, () => highlightAndFit(ids, t.label));
+    });
+  }
+  if (parts.length) {
+    addHeader(`零件 ${parts.length}（可能包含子/合集匹配）`);
+    parts.forEach((p) => {
+      addRow(`件 ${p.label}`, () => highlightAndFit([p.nodeId], p.label));
+    });
+  }
+  // 防止结果列表过多撑爆侧栏
+  if (box.children.length > 40) { box.hidden = true; addHeader('结果过多，请更精确输入'); box.hidden = false; }
+  box.hidden = !(tmpls.length || parts.length);
+}
+
+const stepSearchInput = $('#step-search');
+if (stepSearchInput) {
+  let srchTimer = null;
+  stepSearchInput.addEventListener('input', () => {
+    clearTimeout(srchTimer);
+    srchTimer = setTimeout(() => renderSearch(stepSearchInput.value), 150);
+  });
+  stepSearchInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') { stepSearchInput.value = ''; renderSearch(''); }
+  });
+}
+
+// ==========================================================================
 // M6.5：移动模式（仅草稿视口 —— 基线视口结构性不可动）
 // 拖拽 = 临时视觉位移；松手 → 折算为 move 步骤 → preview 重放接管定位
 // ==========================================================================
@@ -1450,8 +1979,25 @@ sceneDraft.onMoveEnd(() => commitTempMovesToSteps());
 // 视口点选：两个视口均可点选定位目标（焦点 + 表单目标 + 高亮联动）
 sceneBaseline.onPick((id, ndc) => handlePick(id, ndc, sceneBaseline));
 sceneDraft.onPick((id, ndc) => handlePick(id, ndc, sceneDraft));
+
+/** 点击空白：清除「选中/目标」，但保留当前视图锚点（focus/range）——
+ *  在子装配/零件视图里取消选中不应跳回整装配。 */
+function clearSelection() {
+  treeBaseline.select(null);
+  treeDraft.select(null);
+  state.targetInstance = { nodeId: null, templateId: null };
+  updateRangeButtons();
+  reapplyViewFilter();           // 保留当前范围可见性，仅清除装配高亮
+  sceneBaseline.showFeature(null, null);   // 清除特征 overlay
+  sceneDraft.showFeature(null, null);
+  if (state.moveMode) sceneDraft.disableMove();
+  refreshTargetRow();
+  renderParams();                // 目标条回到"未选中"提示
+  statusFn('已清除选中');
+}
+
 async function handlePick(id, ndc, srcScene) {
-  if (!id) return;
+  if (!id) { clearSelection(); return; }
   treeBaseline.select(id);
   treeDraft.select(id);
   state.focus = { level: 'part', nodeId: id };
@@ -1459,19 +2005,47 @@ async function handlePick(id, ndc, srcScene) {
   if (state.range !== 'root' && state.range !== 'assembly' && state.range !== 'part') {
     state.range = 'root';
   }
-  const tid = sceneBaseline.templateOf(id);
+  const tid = srcScene?.templateOf?.(id) ?? sceneBaseline.templateOf(id);
+  // 目标实例：两域都依据 3D 点选（装配域 replace/move、零件编辑域的目标模板/特征都跟随它）
+  state.targetInstance = { nodeId: id, templateId: tid || null };
   if (tid) setTargetTemplate(tid);   // 内部含 reapplyViewFilter（模板未变时提前返回）
   reapplyViewFilter();               // 焦点变化影响范围过滤，统一重应用（幂等）
+  // 点选反馈：两域都高亮被点中的零件（reapplyViewFilter 已清除，这里重染）。
+  // 这解决"默认零件编辑域点零件无反馈、看似选不了"的问题。
+  {
+    const sel = new Set([id]);
+    sceneBaseline.highlight(sel);
+    sceneDraft.highlight(sel);
+  }
+  refreshTargetRow();   // 目标行跟随（两域常显）
+  renderParams();       // 重建 in-params 目标条
+  applyDomainFieldVisibility();   // 兜底：装配域点选后也确保模板/特征行保持隐藏
   if (state.moveMode) sceneDraft.enableMove([id]);   // 移动模式跟随点选换目标
-  // 特征粒度：点击模型面 → 联动目标特征列表（特征级拾取）
+  // 一次点击只产生「一个」确定选中，避免零件/特征两层状态与上行数据混淆：
+  //  - 装配域：选中=实例（默认选中色高亮）
+  //  - 零件域：选中=特征（严格特征优先：pickFeatureAt 命中或最近兜底，恒有特征）
+  //  - 零件域该类无任何特征 → 仅设目标、不高亮（极罕见）
   let featId = null;
-  if (ndc && currentGranularity() === 'feature' && srcScene) {
+  if (ndc && currentDomain() === 'part' && srcScene) {
     featId = await srcScene.pickFeatureAt(ndc, id);
-    if (featId) {
-      // 列表可能正在随模板切换重载（JSON/gltF 竞态）：pending 兜底
-      pendingFeature = { templateId: tid, featureId: featId };
-      applyPendingFeature();
-    }
+  }
+  if (currentDomain() === 'assembly') {
+    const sel = new Set([id]);
+    sceneBaseline.highlight(sel);
+    sceneDraft.highlight(sel);
+  } else if (featId) {
+    sceneBaseline.highlight(null);
+    sceneDraft.highlight(null);
+    pendingFeature = { templateId: tid, featureId: featId };
+    applyPendingFeature();
+  } else {
+    sceneBaseline.highlight(null);
+    sceneDraft.highlight(null);
+    sceneBaseline.showFeature(null, null);
+    sceneDraft.showFeature(null, null);
+    pendingFeature = null;
+    const fs = $('#sf-feature'); if (fs) fs.value = '';
+    renderOperations();
   }
   // M6：选中上行——agent 在对话框里说"这个"时能定位到这里点的是谁
   if (state.cacheKey) {
@@ -1514,6 +2088,7 @@ async function reloadDraftFromServer(fromAgent) {
       state.feaResult = null;
       state.feaStale = false;
       clearExactResult();
+      resetDraftIdentity();   // 清除换件身份
       renderDraftSteps();
       renderVerify({ interferences: [], edited_templates: [] });
       schedulePreview();
