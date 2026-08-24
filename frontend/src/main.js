@@ -539,13 +539,7 @@ function updateFeaturePanel() {
               status(`已提交 ${res.version}：${res.changelog}`);
               refreshVersions();
             } catch (err) {
-              if (err.status === 409 && err.payload?.interferences) {
-                const rows = err.payload.interferences
-                  .map((h) => `${h.a.name} ↔ ${h.b.name}（${h.volume_mm3} mm³）`).join('；');
-                window.alert(`⛔ 干涉守门拒绝：${rows}\n几何保持 ${err.payload.version} 不变。`);
-              } else {
-                window.alert(`错误：${err.message}`);
-              }
+              window.alert(`错误：${err.message}`);
             } finally {
               btn.disabled = false;
               btn.textContent = '扩径';
@@ -566,7 +560,7 @@ function updateFeaturePanel() {
     .catch(() => fp.classList.add('hidden'));
 }
 
-// ---- 编辑面板（Phase C：写操作 → 干涉守门 → 原子版本提交） ----
+// ---- 编辑面板（Phase C：写操作 → 原子版本提交；干涉仅前端提醒） ----
 const ep = $('#edit-panel');
 const epTitle = $('#ep-title');
 const epOp = $('#ep-op');
@@ -638,16 +632,8 @@ $('#ep-run').addEventListener('click', async () => {
     status(`已提交 ${res.version}：${res.changelog}`);
     refreshVersions();
   } catch (err) {
-    // R15: 结构化拒绝（干涉）显式呈现
-    if (err.status === 409 && err.payload?.interferences) {
-      const rows = err.payload.interferences
-        .map((h) => `${h.a.name} ↔ ${h.b.name}（${h.volume_mm3} mm³）`).join('；');
-      epMsg.className = 'ep-msg-error';
-      epMsg.textContent = `⛔ 干涉守门拒绝：${rows}。几何保持 ${err.payload.version} 不变。`;
-    } else {
       epMsg.className = 'ep-msg-error';
       epMsg.textContent = `错误：${err.message}`;
-    }
     epMsg.classList.remove('hidden');
   }
 });

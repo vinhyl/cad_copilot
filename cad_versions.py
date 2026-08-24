@@ -135,7 +135,8 @@ class VersionStore:
 
     def commit(self, changes: dict, changelog: str,
                prepared_dir: str | None = None,
-               moves: dict | None = None) -> dict:
+               moves: dict | None = None,
+               removed_ids: list | set | None = None) -> dict:
         """Atomically commit a new version.
 
         Args:
@@ -147,10 +148,12 @@ class VersionStore:
             moves: M6.5 实例级位移 {node_id: {"dx","dy","dz"}}（草稿 move
                 步骤落版本）。允许 moves-only 提交（changes 为空）；
                 语义为"该节点相对基线的总位移"，跨版本后写覆盖。
+            removed_ids: 实例级删除 {node_id}（草稿 remove 步骤落版本）。
+                与 moves 一样，允许 removal-only 提交（changes 为空）。
 
         Returns the new version record.
         """
-        if not changes and not moves:
+        if not changes and not moves and not removed_ids:
             raise ValueError("empty changes")
         vid = self.next_version_id()
         target = os.path.join(self.root, vid)
@@ -190,10 +193,28 @@ class VersionStore:
                                      "dy": float(d.get("dy", 0)),
                                      "dz": float(d.get("dz", 0))}
                                for nid, d in moves.items()}
+        if removed_ids:
+            record["removed"] = sorted(removed_ids)
         self._manifest["versions"].append(record)
         self._manifest["current"] = vid
         self._save_manifest()
         return record
+
+    def resolve_removed(self, version: str | None = None) -> set:
+        """{node_id} —— 版本链上 ≤ version 的全部 remove（删除）记录。
+
+        一旦在某版本删除即视为永久生效，故取所有已记录 node_id 的并集
+        （与 resolve_moves 的"后写覆盖"不同：删除没有撤销语义，前端靠
+        删除草稿步骤来恢复）。"""
+        vid = version or self.current
+        order = self._version_order()
+        if vid not in order:
+            raise KeyError(f"no such version: {vid}")
+        out: set = set()
+        for v in self._manifest["versions"]:
+            if order[v["id"]] <= order[vid]:
+                out.update(v.get("removed") or [])
+        return out
 
     def resolve_moves(self, version: str | None = None) -> dict:
         """{node_id: (dx, dy, dz)} —— 版本链上 ≤ version 的全部 moves，

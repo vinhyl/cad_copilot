@@ -493,6 +493,10 @@ const ASSEMBLY_OPS = {
       { key: 'dz', label: 'Z (mm)', type: 'num', def: 0 },
     ],
   },
+  remove: {
+    label: '删除零件', instance: true,
+    fields: [],
+  },
 };
 
 function setFormHint(text, level = 'info') {
@@ -1033,6 +1037,11 @@ function addAssemblyStep(opKey) {
       `${targetInstanceName()}: move Δ(${params.dx},${params.dy},${params.dz}) mm`);
     return;
   }
+  if (opKey === 'remove') {
+    upsertAssemblyStep(nodeId, templateId, 'remove', {},
+      `${targetInstanceName()}: 删除`);
+    return;
+  }
   // replace
   const srcSel = document.getElementById('sf-p-source');
   const src = srcSel?.value || '';
@@ -1083,10 +1092,9 @@ function schedulePreview() {
   state.previewTimer = setTimeout(() => runPreview('bbox'), 250);
 }
 
-/** 草稿预览 + 干涉检查。
+/** 草稿预览 + 干涉检查（仅提醒，不拦保存）。
  * level='bbox'（默认）：AABB 快速反馈，步骤每次变更自动触发（毫秒级，
- * 拖拽调位不卡）；level='exact'：布尔精检，显式按钮触发，确认保存
- * 的后端守门也始终 exact——快速反馈只做提示，落版本前的判定不降级。 */
+ * 拖拽调位不卡）；level='exact'：布尔精检，显式按钮触发，给用户自查。 */
 async function runPreview(level = 'bbox') {
   if (!state.cacheKey || !state.baselineLoaded) return;
   if (state.previewInFlight) {
@@ -1127,7 +1135,7 @@ async function runPreview(level = 'bbox') {
   } catch (err) {
     const payload = err.payload || {};
     if (payload.interferences) {
-      // 409：草稿几何产生干涉（preview 也走守门）
+      // 服务端返回干涉数据：仅展示，不拦草稿
       renderVerify(payload);
       setVerifyHint(`草稿产生 ${payload.interferences.length} 处干涉`, 'error');
     } else {
@@ -1367,8 +1375,7 @@ function setVerifyHint(text, level = 'info') {
 }
 setVerifyHint('等待草稿步骤变更…（自动检查为 AABB 快速粗筛）');
 
-// 精确检查按钮：显式触发布尔精检（自动粗筛只做 AABB 提示；
-// 确认保存的后端守门也始终 exact）
+// 精确检查按钮：显式触发布尔精检（自动粗筛只做 AABB 提示）
 $('#verify-exact').addEventListener('click', () => runPreview('exact'));
 $('#verify-reset').addEventListener('click', () => resetVerify());
 
@@ -1662,10 +1669,10 @@ $('#sess-confirm').addEventListener('click', async () => {
   if (!state.draftSteps.length) {
     statusFn('没有可确认的草稿步骤', true); return;
   }
-  if (!confirm('确认将草稿步骤全部落为一条版本？干涉守门将再次完整检查。')) return;
+  if (!confirm('确认将草稿步骤全部落为一条版本？')) return;
   const btn = $('#sess-confirm');
   btn.disabled = true;   // 防重复提交（成功窗口内连点 = 落两个版本）
-  statusFn('提交中（重放 + 完整干涉守门）…');
+  statusFn('提交中…');
   try {
     const res = await confirmDraft(state.cacheKey, state.draftSteps);
     // 成功：版本已落。立即清内存态（跳转前窗口内不可再提交），回首页
@@ -1678,14 +1685,7 @@ $('#sess-confirm').addEventListener('click', async () => {
     statusFn(`已落版本 ${res.version}：${res.changelog.split('\n')[0]}`);
     setTimeout(() => goHomeKeepAssembly({ flash: `已落版本 ${res.version}` }), 900);
   } catch (err) {
-    const payload = err.payload || {};
-    if (payload.interferences) {
-      setVerifyHint(`守门拒绝：${payload.interferences.length} 处干涉`, 'error');
-      renderVerify(payload);
-      statusFn(`提交被守门拒绝：${payload.interferences.length} 处干涉（版本未变）`, true);
-    } else {
-      statusFn(`提交失败：${err.message}`, true);
-    }
+    statusFn(`提交失败：${err.message}`, true);
     btn.disabled = false;   // 失败可重试
   }
 });

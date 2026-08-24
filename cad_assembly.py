@@ -1228,6 +1228,8 @@ def replay_draft_shapes(cache_dir: str, manifest: dict, store,
             raise ValueError(f"step missing operation: {s}")
         if op.lower() == "move":
             continue   # 实例级位移：manifest 侧处理（moves_from_steps）
+        if op.lower() == "remove":
+            continue   # 实例级删除：manifest 侧剪枝（removed_ids_from_steps）
         if not tid:
             raise ValueError(f"step missing template_id: {s}")
 
@@ -1331,6 +1333,58 @@ def apply_moves(manifest: dict, moves: dict) -> dict:
     return out
 
 
+def removed_ids_from_steps(steps: list) -> set:
+    """{node_id} —— 每条 remove 步骤删除一个零件实例。
+    单个 node 至多一条（前端 upsert 后写覆盖，同 move）。"""
+    out: set = set()
+    for s in steps:
+        if (s.get("operation") or "").lower() != "remove":
+            continue
+        nid = s.get("node_id")
+        if not nid:
+            raise ValueError(f"remove step missing node_id: {s}")
+        out.add(nid)
+    return out
+
+
+def apply_removals(manifest: dict, removed_ids: set) -> dict:
+    """Deep-copy manifest，移除被 delete 的节点及其整棵子树。
+
+    语义："删除零件" = 该实例从装配视图消失，且不参与干涉检查（节点
+    剪枝后 check_interference 的实例遍历不再量到它）。模板列表保持不
+    动——同一模板可能被其余实例共享，绝不能按节点删除去重。
+    未知 node_id 直接 ValueError（与 apply_moves 严格一致）。"""
+    import copy
+    out = copy.deepcopy(manifest)
+    found: set = set()
+    root = out["root"]
+
+    if root.get("id") in removed_ids:
+        found.add(root["id"])
+        out["root"] = None   # 整装配被删：置空根（不应出现，防御兜底）
+    else:
+        # 子树剪枝：从叶子往根收集（先递归子节点，再决定本节点去留）
+        def prune(node: dict) -> None:
+            if node.get("id") in removed_ids:
+                found.add(node["id"])
+                node["children"] = []   # 本节点被判删：其整棵子树一并丢弃
+                return
+            kept = []
+            for c in node.get("children", []):
+                prune(c)
+                if c.get("id") not in removed_ids:
+                    kept.append(c)
+            node["children"] = kept
+
+        prune(root)
+    unknown = removed_ids - found
+    if unknown:
+        raise ValueError(
+            f"remove 步骤引用了不存在的 node_id: {sorted(unknown)}"
+            f"（node_id 是装配树节点 id 如 'n2'，不是 STEP 名 'NAUO66'）")
+    return out
+
+
 def draft_step_title(step: dict, manifest: dict) -> str:
     """Deterministic human-readable title for a draft step (used by the
     frontend and the eventual batch changelog)."""
@@ -1342,6 +1396,11 @@ def draft_step_title(step: dict, manifest: dict) -> str:
         name = node.get("name", nid) if node else nid
         return (f"{name}: move Δ({params.get('dx', 0)},"
                 f"{params.get('dy', 0)},{params.get('dz', 0)}) mm")
+    if op.lower() == "remove":
+        nid = step.get("node_id", "?")
+        node = _find_node(manifest, nid)
+        name = node.get("name", nid) if node else nid
+        return f"{name}: 删除"
     tid = step.get("template_id", "?")
     tpl = next((t for t in manifest.get("templates", []) if t["id"] == tid), None)
     tpl_name = tpl.get("name", tid) if tpl else tid

@@ -149,7 +149,7 @@ venv/bin/python        cad_mcp_server.py    # macOS / Linux
 | `boolean_parts` | 布尔运算：fuse / cut / common | ✅ 启用 |
 | `pick_features` | 特征结构化枚举（稳定 id #N / #N.k / P#，与 Web 视口拾取同源；不写文件） | ✅ 启用 |
 | `parse_assembly` | 装配体 STEP → 装配树 + 4×4 矩阵 + 去重零件模板（glTF 缓存，Web 前端 Template+Matrix 数据源） | ✅ 启用 |
-| `check_interference` | 装配体全实例对布尔干涉审计（确定性守门，D8） | ✅ 启用 |
+| `check_interference` | 装配体全实例对布尔干涉审计（确定性计算，D8；仅提醒不拦保存） | ✅ 启用 |
 | `audit_assembly` | 一键体检：干涉 + DFM 规则（小孔/深孔/薄壁，模块七） | ✅ 启用 |
 | `list_sessions` | 会话发现：服务端最近打开的装配体（cacheKey / 时间 / 草稿步骤数），跨浏览器同步 | ✅ 启用 |
 | `get_user_selection` | 读用户当前选中（零件 / 特征 + 所在页面 / 标签页，多窗口区分）——"这个零件厚度加 1mm"式对话的上下文来源 | ✅ 启用 |
@@ -188,13 +188,13 @@ venv/Scripts/python cad_service.py     # http://127.0.0.1:8764，固定 token ca
 | `POST /api/upload?name=` | **显式授权输入通道**：原始请求体 → 内容寻址落盘 `uploads/<sha256>/`（同内容去重回路径） |
 | `POST /api/assembly/parse` | 装配 STEP → manifest + 写缓存（Bearer token） |
 | `GET /api/assembly/view?cache_key=` | cacheKey 直载已缓存装配体（不读源文件、不重 parse；回首页 / 最近列表 / URL 引导通道） |
-| `POST /api/assembly/edit` | **写操作**：模板编辑 → 干涉守门 → 原子版本提交（409 = 干涉拒绝） |
+| `POST /api/assembly/edit` | **写操作**：模板编辑 → 原子版本提交（干涉仅前端提醒，不拦截） |
 | `GET /api/assembly/audit?cache_key=` | 一键体检：干涉 + DFM 规则（确定性计算） |
 | `GET /api/drafts?cache_key=` | 草稿读取（单槽位：声明式步骤表） |
 | `POST /api/drafts/save` | 手动保存草稿（单槽位覆盖） |
 | `DELETE /api/drafts?cache_key=` | 放弃草稿（清空步骤与预览产物） |
 | `POST /api/drafts/preview` | 草稿重放 → 草稿 manifest + 增量干涉（`level=bbox` 默认 AABB 粗筛毫秒级 / `exact` 布尔精检） |
-| `POST /api/drafts/confirm` | **确认保存**：全部草稿步骤原子落为一个版本（守门始终 exact 布尔） |
+| `POST /api/drafts/confirm` | **确认保存**：全部草稿步骤原子落为一个版本（干涉仅前端提醒，不拦截） |
 | `POST /api/drafts/fea-compare` | FEA 双跑对比：基线 vs 草稿目标模板静力学（R5 job 模式） |
 | `POST /api/reports/generate` | 生成快照报告（体检 + 统计 + 版本历史聚合） |
 | `GET /api/reports[?cache_key=]` / `GET /api/reports/get` | 报告列表 / 单份报告读取 |
@@ -229,7 +229,7 @@ venv/Scripts/python cad_service.py     # http://127.0.0.1:8764，固定 token ca
 
 ## Web 前端（多页 MPA）
 
-`frontend/` 为 Vite **多入口 MPA** + three.js（three@0.160.0，npm 锁定版本）+
+`frontend/` 为 Vite **多入口 MPA** + three.js（three@0.163.0，npm 锁定版本）+
 原生 JS，四个页面按职责拆分（页面间经 URL 参数传递 cacheKey / scope）：
 
 | 页面 | 入口 | 职责 |
@@ -275,6 +275,8 @@ venv/Scripts/python cad_service.py     # http://127.0.0.1:8764，固定 token ca
 | 临时拖拽移动 | 选中 →「移动」 | TransformControls gizmo，选装配体整组移动；「复位移动」还原 |
 | 相机书签 | 「存视角 / 回视角」 | localStorage，不进版本树 |
 | 复位视图 | 一键 | 爆炸/显隐/临时移动/相机全部还原 |
+| 视角锁定光照 | 默认（无需操作） | 环境光照随相机旋转锁死屏幕（顶亮底暗相对屏幕固定）；金属材质哑光化 + 平滑渐变环境 + NeutralToneMapping，任意角度无过曝、无顶亮底暗、无灰 |
+| 模型配色 | 工具栏「配色」 | 原色 / 月灰 / 钢蓝 / 暖沙 / 墨绿 / 米白——低亮度表面色，缓和纯白面刺眼；只改模型色、背景恒定深色；localStorage 跨页记忆、即时生效 |
 
 **编辑会话页（草稿模式编辑闭环）**：
 
@@ -284,10 +286,11 @@ venv/Scripts/python cad_service.py     # http://127.0.0.1:8764，固定 token ca
 - **声明式草稿步骤表**（左栏）：多目标、可增删；每步变更自动触发草稿重放 +
   干涉检查——**分级**：默认 AABB 粗筛（毫秒级，黄色「可能碰撞」卡片），
   「精确检查」按钮显式布尔精检（红色卡片带穿透体积 mm³ + 耗时秒数）；
-  **确认保存的后端守门始终 exact 布尔**（D8 不降级）
+  **干涉仅作提醒，不拦保存**（自动粗筛 + 手动精检供自查）
 - **操作域二段化**（目标统一由 3D 点选驱动）：
   - **装配操作**（实例级）：**换件 replace**（来源从其它已打开文件选中的零件读取，
-    `align` + dx/dy/dz 偏移）与 **移动 move**（表单 dx/dy/dz 绝对位移，后写覆盖）；
+    `align` + dx/dy/dz 偏移）、**移动 move**（表单 dx/dy/dz 绝对位移，后写覆盖）
+    与 **删除 remove**（整件实例移除，其模板若被其它实例共享则只删这一件）；
     也可开「移动零件」在草稿视口**拖拽**生成 move 步骤（实例级世界系位移）。
   - **零件编辑 = 定点特征**：点零件任意处即命中/就近选中特征（扩孔 / 去凸台），
     目标=该类，配目标模板 / 目标特征。
@@ -310,9 +313,9 @@ venv/Scripts/python cad_service.py     # http://127.0.0.1:8764，固定 token ca
 - **协作边界**：agent 经 MCP 只写草稿（`edit_draft`），「确认保存」按钮永远
   留给用户
 - **直接落版本路径**（Phase C 兼容保留）：首页选中零件 → 编辑面板 →
-  **编辑 → 干涉守门 → 原子版本提交**（409 结构化拒绝含零件对 + 穿透体积）；
+  原子版本提交（干涉仅前端提醒，不拦截）；
   版本面板 v0 基线 + v1..vN 链式增量（每版本只存被改模板的 step/gltf +
-  实例 moves），切换/回滚 = 指针移动，历史版本文件永不重写（D10）
+  实例 moves + remove 记录），切换/回滚 = 指针移动，历史版本文件永不重写（D10）
 
 **一键体检（模块七）**：工具栏「体检」→ 干涉全实例对审计 + DFM 规则
 （小孔 R<0.5 / 深孔 L/D>10 / 平行孔薄壁提示），全部确定性计算（D8）。

@@ -34,7 +34,7 @@ export async function viewAssembly(cacheKey) {
   return body;
 }
 
-/** Phase C: 编辑（干涉守门 + 原子提交）。409 时抛出带 interferences 的错误。
+/** Phase C: 编辑（原子提交；干涉仅前端提醒）。409 时抛出带 interferences 的错误。
  * featureId 提供时为定点特征编辑（R1），否则整模板编辑。 */
 export async function editAssembly(cacheKey, templateId, operation, params, featureId = null) {
   return _post('/api/assembly/edit', {
@@ -110,10 +110,8 @@ export async function deleteDraft(cacheKey, client = '') {
   return body;
 }
 
-/** 重放草稿步骤表得到草稿几何 + 增量干涉（POST /api/drafts/preview）。
- * 409 时（草稿几何不可重建）抛出带 payload 的错误。 */
-/** 草稿预览。level='bbox'（默认）：AABB 快速反馈（拖拽级交互）；
- * 'exact'：布尔精检（显式重检/确认前核对）。确认保存守门始终 exact。 */
+/** 草稿预览（POST /api/drafts/preview）。level='bbox'（默认）：AABB
+ * 快速反馈（拖拽级交互）；'exact'：布尔精检（显式触发给用户自查）。 */
 export async function previewDraft(cacheKey, steps, level = 'bbox') {
   const r = await _post('/api/drafts/preview', {
     cache_key: cacheKey, steps, level,
@@ -121,8 +119,7 @@ export async function previewDraft(cacheKey, steps, level = 'bbox') {
   return r;
 }
 
-/** 把草稿全部步骤落为一条版本（POST /api/drafts/confirm）。
- * 守门拒绝（409）时抛出带 interferences 的错误。 */
+/** 把草稿全部步骤落为一条版本（POST /api/drafts/confirm）。 */
 export async function confirmDraft(cacheKey, steps) {
   const r = await fetch('/api/drafts/confirm', {
     method: 'POST',

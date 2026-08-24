@@ -5,6 +5,36 @@
 
 ## [未发布]
 
+### 变更 (Changed)（装配操作新增「删除」+ 干涉改为仅提醒）
+- **新增装配操作 `remove`（删除零件，实例级）**：3D 点选目标 →「删除零件」→ 添加步骤；草稿重放时从装配树**剪枝该实例及其整棵子树**，草稿视口即时消失、不参与干涉。模板列表不动——同一模板若被其它实例共享则只删这一件。
+- **删除落版本持久化**：`draft_confirm` 把 `removed_ids` 存入版本记录（`cad_versions.commit` + `resolve_removed`），重开装配/回首页时已删除实例不再显示（与 move 同机制，实例级永久删除）。
+- **干涉改为仅提醒，不再拦截所有保存**：移除确认保存（`draft_confirm`）与单模板编辑（`/api/assembly/edit`）的布尔干涉守门（原 409 拒绝）；干涉只靠编辑页自动 AABB 粗筛 + 手动精检供用户自查，自动粗筛、手动精检、点击高亮、跨刷新保留等均保留。
+- 保存与相关 UI/文档中的「守门」文案清理为「干涉仅提醒，不拦保存」。
+
+### 修复 (Fixed)（删除操作相关）
+- **删除后粗筛报错**：`replay_draft_shapes` 未跳过 `remove` 步骤，误入几何编辑校验（`operation must be drill|fillet|chamfer|scale`）。现在 `move`/`remove` 均跳过（实例级由 manifest 侧处理）。
+- **保存草稿报错 `step #N missing template_id/operation`**：`draft_save` 对实例级操作（`move`/`remove`，按 `node_id` 寻址）放宽校验，不再强制要求 `template_id`。
+
+### 变更 (Changed)（查看器光照与模型配色：视角锁定无过曝 + 哑光金属 + 低亮度配色）
+- **过曝根因修复**：OCP 导出材质多为金属（metalness≈1），只反射环境贴图、不吃方向光；
+  原 `RoomEnvironment` 含硬光面板，金属在个别角度把亮面板反射成过曝亮斑。改为**平滑渐变
+  环境贴图**（无硬光斑）+ `scene.environmentRotation.copy(camera.quaternion)` 随相机旋转
+  **锁死屏幕**（顶亮底暗始终相对屏幕固定），任何角度均为柔和渐变、不再过曝；配套
+  `NeutralToneMapping` 软回退 >1.0 高光，无胶片色调偏移。
+- **材质哑光化**：加载时统一 `metalness=0.2 / roughness=0.5` + `AmbientLight` 兜底，让
+  跟随相机的方向光（屏幕顶光 key + 侧下补光 fill）真正给模型上明暗、颜色以漫反射显示——
+  既消除"顶亮底暗"也消除"一团灰"，任意角度光影一致、对比正常。
+- **模型配色主题**（工具栏「配色」按钮）：`原色 / 月灰 / 钢蓝 / 暖沙 / 墨绿 / 米白`——
+  均为比纯白低亮度的表面色，缓和强反光下白面刺眼；**只改模型表面色、背景恒定深色中性**
+  （各预设共用，不再随配色变蓝导致模型不明显）；写 `localStorage`，首页与编辑页双视口
+  记忆同步，切换即时生效、无需重启。
+- **three 升级** `0.160.0 → 0.163.0`（引入 `scene.environmentRotation` / `environmentIntensity`
+  / `NeutralToneMapping`，光照明暗锁屏的关键能力）。
+
+### 修复 (Fixed)（查看器加载假死）
+- 配色逻辑在构造函数早期访问尚未创建的 `this.group` → `TypeError` 整页崩溃假死；
+  `_applyModelColor` 增加 `if (!this.group) return` 守卫，模型 `load()` 完成后正常染色、功能不受影响。
+
 ### 变更 (Changed)（编辑页装配体级编辑：操作域二段化 + 换件身份 + 特征级编辑）
 - **操作域二段化**：`[零件编辑]` / `[装配操作]` 两个操作域，目标统一由 3D 点选（`targetInstance`）驱动。
   - **装配操作**（实例级）：新增 **换件 replace**（来源从其它已打开文件选中的零件读取，`/api/selection?all=1` 剔除当前 cache_key；含 `align` + dx/dy/dz 偏移）与 **移动 move**（表单 dx/dy/dz 绝对位移，后写覆盖）。装配域下隐藏「目标模板/目标特征」。

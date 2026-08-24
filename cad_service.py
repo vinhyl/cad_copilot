@@ -522,6 +522,9 @@ def create_app(token: str | None = None,
         moves = store.resolve_moves()
         if moves:
             manifest = cad_assembly.apply_moves(manifest, moves)
+        removed = store.resolve_removed()
+        if removed:
+            manifest = cad_assembly.apply_removals(manifest, removed)
         return manifest
 
     def _edit_context(cache_key: str):
@@ -533,8 +536,8 @@ def create_app(token: str | None = None,
 
     async def edit(request):
         """POST /api/assembly/edit -- the write path (③ 类流程):
-        apply template edit -> interference gate -> atomic version commit.
-        Nothing is committed when the gate rejects (R15: structured error)."""
+        apply template edit -> atomic version commit.
+        干涉仅由前端作提醒，落版本不做布尔守门。"""
         try:
             check_auth(request)
             body = json.loads(await request.body() or b"{}")
@@ -604,23 +607,7 @@ def create_app(token: str | None = None,
                         changelog = (f"{tpl['name']}: {operation} "
                                      + ", ".join(f"{k}={v}" for k, v in params.items()))
 
-                    # interference gate: edited template instances vs the rest
-                    all_shapes = cad_assembly.template_shapes_from_cache(
-                        cache_dir, manifest)
-                    all_shapes[tid] = new_shape
-                    hits = cad_assembly.check_interference(
-                        manifest, all_shapes, edited_template=tid,
-                        edited_shape=new_shape)
-                    if hits:
-                        # R15: structured rejection, nothing committed
-                        return JSONResponse({
-                            "ok": False, "error": "interference",
-                            "stage": "interference_gate",
-                            "interferences": hits,
-                            "message": f"修改会导致 {len(hits)} 处物理干涉，已拒绝提交；"
-                                       f"几何保持 {store.current} 不变。",
-                            "version": store.current,
-                        }, status_code=409)
+                    # (干涉仅提醒，不拦保存：由前端自动粗筛 + 手动精检自查)
 
                     # prepare new version files in a temp dir (R6), then commit
                     os.makedirs(tmp_dir, exist_ok=True)
@@ -641,7 +628,7 @@ def create_app(token: str | None = None,
                         pass
                     return record, changelog
             result = await run_in_threadpool(work)
-            if isinstance(result, JSONResponse):   # 守门/校验拒绝路径
+            if isinstance(result, JSONResponse):   # 校验拒绝路径
                 return result
             record, changelog = result
         except ValueError as e:
@@ -784,9 +771,16 @@ def create_app(token: str | None = None,
         except (KeyError, ValueError) as e:
             return JSONResponse({"error": f"bad request: {e}"}, status_code=400)
         steps = body.get("steps") or []
-        # 轻量校验：每项必须有 template_id/operation
+        # 轻量校验：每项必须有 operation；几何编辑步骤（非实例级）还需
+        # template_id。move/remove 是实例级操作，仅用 node_id 寻址
+        # （重放时按 node_id 处理），template_id 可选（前端有则带，无不算错）。
         for i, s in enumerate(steps):
-            if not s.get("template_id") or not s.get("operation"):
+            if not s.get("operation"):
+                return JSONResponse(
+                    {"error": f"step #{i} missing operation"},
+                    status_code=400)
+            op = str(s.get("operation")).lower()
+            if op not in ("move", "remove") and not s.get("template_id"):
                 return JSONResponse(
                     {"error": f"step #{i} missing template_id/operation"},
                     status_code=400)
@@ -865,8 +859,7 @@ def create_app(token: str | None = None,
             cache_key = str(body["cache_key"])
             steps = body.get("steps") or []
             # level: 'bbox'（默认，AABB 快速反馈，拖拽级交互用）|'exact'
-            # （布尔精检，显式重检/确认前核对用）。确认保存的守门
-            # 始终 exact，不受此参数影响。
+            # （布尔精检，显式触发给用户自查，仅提醒不拦保存）。
             level = str(body.get("level") or "bbox")
             if level not in ("bbox", "exact"):
                 return JSONResponse(
@@ -890,12 +883,19 @@ def create_app(token: str | None = None,
                     # 否则删光步骤的 preview 会退化为全量 O(n²) 布尔
                     # 检查（62 模板实测 ~5 分钟）
                     if not steps:
-                        return {}, {}, [], {"per_template": [], "totals": {}}, manifest, {}
+                        return {}, {}, [], {"per_template": [], "totals": {}}, manifest, {}, set()
                     # 1) move 步骤解析+校验提前（未命中 node_id 直接
                     # ValueError 400，不再先花 ~7s 加载全模板形状）
                     moves = cad_assembly.moves_from_steps(steps)
                     gate_manifest = (cad_assembly.apply_moves(manifest, moves)
                                      if moves else manifest)
+                    # 1b) M 删除步骤：从 gate_manifest 剪枝对应实例
+                    # （不参与干涉/渲染）。先 move 后 remove：同一节点
+                    # 既被移又被删时，以删为准。
+                    removed_ids = cad_assembly.removed_ids_from_steps(steps)
+                    if removed_ids:
+                        gate_manifest = cad_assembly.apply_removals(
+                            gate_manifest, removed_ids)
                     # 2) 重放草稿几何步骤，得到 {tid: shape}
                     edited_shapes = cad_assembly.replay_draft_shapes(
                         cache_dir, manifest, store, steps,
@@ -945,9 +945,9 @@ def create_app(token: str | None = None,
                             if t["id"] in replaced:
                                 t["name"] = replaced[t["id"]]["name"]
                     return (edited_shapes, moves, hits, diff, draft_manifest,
-                            replaced)
-            edited_shapes, moves, hits, diff, draft_manifest, replaced = \
-                await run_in_threadpool(work)
+                            replaced, removed_ids)
+            edited_shapes, moves, hits, diff, draft_manifest, replaced, \
+                removed_ids = await run_in_threadpool(work)
         except ValueError as e:
             return JSONResponse({"ok": False, "error": str(e),
                                  "stage": "validation"}, status_code=400)
@@ -965,6 +965,7 @@ def create_app(token: str | None = None,
             "check_level": level,
             "edited_templates": list(edited_shapes.keys()),
             "moved_nodes": list(moves.keys()),
+            "removed_nodes": sorted(removed_ids),
             "replaced": replaced,       # 被替换模板的新零件名（Phase2 换件身份）
             "diff": diff,
         })
@@ -973,10 +974,8 @@ def create_app(token: str | None = None,
         """POST /api/drafts/confirm -- 把草稿步骤全部落为一条版本。
 
         body: ``{cache_key, steps, baseline_version?}``。
-        流程：重放草稿 -> 完整体检守门（多模板增量） -> 通过则批量
-        提交（一个版本，changelog 列出所有步骤标题） -> 删除草稿文件。
-
-        守门拒绝（409）则版本不动，返回结构化干涉结果。
+        流程：重放草稿 -> 批量提交（一个版本，changelog 列出所有步骤
+        标题） -> 删除草稿文件。干涉仅前端提醒，落版本不做布尔守门。
         """
         try:
             check_auth(request)
@@ -1009,23 +1008,13 @@ def create_app(token: str | None = None,
                     moves = cad_assembly.moves_from_steps(steps)
                     gate_manifest = (cad_assembly.apply_moves(manifest, moves)
                                      if moves else manifest)
-                    # 2) 完整增量干涉守门（与 preview 同样的多模板 + move 检查）
-                    all_shapes = cad_assembly.template_shapes_from_cache(
-                        cache_dir, manifest)
-                    all_shapes.update(edited_shapes)
-                    hits = cad_assembly.check_interference(
-                        gate_manifest, all_shapes,
-                        edited_templates=edited_shapes,
-                        moved_ids=set(moves.keys()))
-                    if hits:
-                        return JSONResponse({
-                            "ok": False, "error": "interference",
-                            "stage": "interference_gate",
-                            "interferences": hits,
-                            "message": f"草稿会导致 {len(hits)} 处干涉，"
-                                       f"已拒绝提交；版本保持 {store.current}。",
-                            "version": store.current,
-                        }, status_code=409)
+                    removed_ids = cad_assembly.removed_ids_from_steps(steps)
+                    if removed_ids:
+                        gate_manifest = cad_assembly.apply_removals(
+                            gate_manifest, removed_ids)
+                    # 2) 干涉仅作为提醒，不拦保存：自动 AABB 粗筛 + 手动
+                    # 精检已由 preview 提供，确认保存不再做布尔守门（D8 由
+                    # 用户在 Web UI 自查，AI/系统不替用户挡提交）。
                     # 3) 批量提交：一个版本，包含所有被编辑模板的 step+gltf
                     os.makedirs(tmp_dir, exist_ok=True)
                     changes = {}
@@ -1049,7 +1038,8 @@ def create_app(token: str | None = None,
                     record = store.commit(
                         changes, changelog=changelog, prepared_dir=tmp_dir,
                         moves={nid: {"dx": d[0], "dy": d[1], "dz": d[2]}
-                               for nid, d in moves.items()})
+                               for nid, d in moves.items()},
+                        removed_ids=sorted(removed_ids))
                     # 4) 刷新被编辑模板的特征缓存（保留稳定 id）
                     for tid, shp in edited_shapes.items():
                         try:
@@ -1064,7 +1054,7 @@ def create_app(token: str | None = None,
                                    ignore_errors=True)
                     return record, changelog
             result = await run_in_threadpool(work)
-            if isinstance(result, JSONResponse):   # 守门拒绝路径
+            if isinstance(result, JSONResponse):   # 校验拒绝路径
                 return result
             record, changelog = result
         except ValueError as e:
