@@ -7,6 +7,9 @@ import { TransformControls } from 'three/addons/controls/TransformControls.js';
 
 const BASE_COLOR = new THREE.Color(0xffffff);
 const SELECT_COLOR = new THREE.Color(0xff8a3d);
+// 干涉对高亮：两个零件用强烈对比色（洋红 / 青），一眼区分是哪两个
+const INTERFERENCE_COLOR_A = new THREE.Color(0xff00c8);
+const INTERFERENCE_COLOR_B = new THREE.Color(0x00c8ff);
 const ZERO_SCALE = new THREE.Matrix4().makeScale(0, 0, 0);
 
 /**
@@ -196,6 +199,17 @@ export class AssemblyScene {
     const sel = partIds || new Set();
     for (const [id, { mesh, index }] of this.instances) {
       mesh.setColorAt(index, sel.has(id) ? SELECT_COLOR : BASE_COLOR);
+      if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+    }
+  }
+
+  /** 干涉对高亮：零件 A 洋红、零件 B 青，用强对比色让两个零件更直观。 */
+  highlightPair(idA, idB) {
+    for (const [id, { mesh, index }] of this.instances) {
+      let c = BASE_COLOR;
+      if (id === idA) c = INTERFERENCE_COLOR_A;
+      else if (id === idB) c = INTERFERENCE_COLOR_B;
+      mesh.setColorAt(index, c);
       if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
     }
   }

@@ -59,6 +59,9 @@ const state = {
   feaStale: false,           // 步骤变更后已有结果过期
   // M6.5：移动模式（仅草稿视口）
   moveMode: false,
+  // 精检结果跨刷新保留（逐处处理干涉时不因步骤改动即丢失）
+  exactResult: null,   // 最近一次精检结果（保持显示，直到手动重置/重新精检）
+  verifyStale: false,  // 步骤改动后，已存精检结果对未来几何已过期
 };
 
 // ==========================================================================
@@ -104,8 +107,9 @@ async function loadBaseline() {
       state.dirty = false;   // 与服务端一致
       statusFn(`已恢复草稿（${state.draftSteps.length} 步，基线 ${d.baseline_version || curVersion}）`);
       renderDraftSteps();
-      // 自动触发一次 preview 把草稿几何 + 干涉刷出来
-      schedulePreview();
+      // 优先恢复上次精检结果（步序未变）；有则跳过本次自动 bbox 预览，
+      // 无则照常自动触发一次 preview 把草稿几何 + 干涉刷出来
+      if (!tryRestoreExact()) schedulePreview();
     } else {
       renderDraftSteps();
       statusFn(`已锁定基线 ${curVersion}：${manifest.source_file}`);
@@ -713,11 +717,123 @@ async function runPreview(level = 'bbox') {
   }
 }
 
+/** 点击干涉结果：在模型上高亮对应的两个零件（双视口同染），并取景到两者。
+ *  h: 干涉项 {a:{id,name}, b:{id,name}, volume_mm3?} */
+function focusInterference(h) {
+  const a = h?.a?.id, b = h?.b?.id;
+  if (!a || !b || !state.baselineLoaded) return;
+  const ids = [a, b];
+  sceneBaseline.highlightPair(a, b);   // 洋红/青强对比，两个零件更直观
+  sceneDraft.highlightPair(a, b);
+  sceneBaseline.fitToIds(ids);
+  if (!camSync) sceneDraft.fitToIds(ids);   // 相机联动时基线取景已带过去
+  statusFn(`已高亮 ${h.a?.name || a} ↔ ${h.b?.name || b}`);
+}
+
+// ==========================================================================
+// 精确检查结果跨刷新保留：只保留「步序未变时的精检结果」，一步骤有改动即失效
+// （存 sessionStorage，按 cache_key 分槽；刷新同标签页保留，关标签页即清）
+// ==========================================================================
+const VERIFY_STORE_PREFIX = 'cad-verify:';
+
+/** 对步骤表内容做轻量哈希（忽略 id/title 等展示字段，只算会改变几何的部分）。 */
+function draftStepsHash(steps) {
+  const s = JSON.stringify((steps || []).map((st) => ({
+    template_id: st.template_id,
+    operation: st.operation,
+    params: st.params,
+    feature_id: st.feature_id,
+    node_id: st.node_id,
+  })));
+  let h = 5381;
+  for (let i = 0; i < s.length; i++) { h = ((h << 5) + h) + s.charCodeAt(i); h |= 0; }
+  return `v1_${Math.abs(h).toString(36)}`;
+}
+
+/** 保存精检结果（仅 exact；含 manifest 以便刷新后重建草稿几何，含步序哈希
+ *  用于判定恢复后是否已过期）。步骤改动也不会清除——逐处处理干涉时列表保持。 */
+function saveExactResult(res) {
+  if (res?.check_level !== 'exact' || !state.cacheKey) return;
+  try {
+    sessionStorage.setItem(
+      VERIFY_STORE_PREFIX + state.cacheKey,
+      JSON.stringify({ hash: draftStepsHash(state.draftSteps), res }),
+    );
+  } catch (_) { /* 存储满/禁用：静默忽略，回退为不保留 */ }
+}
+
+/** 清除当前精检结果（含本地存储），由「重置」与放弃草稿/删除草稿触发。 */
+function clearExactResult() {
+  state.exactResult = null;
+  state.verifyStale = false;
+  try { sessionStorage.removeItem(VERIFY_STORE_PREFIX + state.cacheKey); } catch (_) {}
+}
+
+/** 手动重置：丢弃已存精检列表，回到当前几何的自动粗筛。 */
+function resetVerify() {
+  clearExactResult();
+  schedulePreview();
+  statusFn('已重置检查结果，回到自动粗筛');
+}
+
+/** 尝试恢复上次精检结果。成功（返回 true）时已重建草稿几何并刷新验证栏，
+ *  调用方应跳过本次自动 bbox 预览；失败则返回 false。步序若有改动仍恢复，
+ *  但标记为已过期（由用户「重置」或重新精检决定）。 */
+function tryRestoreExact() {
+  if (!state.cacheKey || !state.baselineLoaded) return false;
+  let entry = null;
+  try {
+    const raw = sessionStorage.getItem(VERIFY_STORE_PREFIX + state.cacheKey);
+    if (raw) entry = JSON.parse(raw);
+  } catch (_) { /* 解析失败按不存在处理 */ }
+  const res = entry?.res;
+  if (res?.check_level !== 'exact') return false;
+  state.lastPreview = res;
+  state.exactResult = res;
+  if (entry.hash !== draftStepsHash(state.draftSteps)) {
+    state.verifyStale = true;   // 步序已变：结果对未来几何过期，但先不丢
+  } else {
+    state.verifyStale = false;
+  }
+  const restorePane = () => {
+    renderVerify(res);
+    const n = (res.interferences || []).length;
+    setVerifyHint(state.verifyStale
+      ? `已恢复精检结果（${n} 处干涉 · 步序已变，已过期）`
+      : (n ? `已恢复精检结果（${n} 处干涉）` : '已恢复精检结果（无干涉）'),
+      state.verifyStale ? 'warn' : (n ? 'error' : 'ok'));
+  };
+  if (res.manifest) {
+    sceneDraft.load(res.manifest, res.base_url || '').then(() => {
+      treeDraft.render(res.manifest.root);
+      reapplyViewFilter();
+      reapplyObservation();
+      if (state.moveMode && state.focus.nodeId) sceneDraft.enableMove([state.focus.nodeId]);
+      restorePane();
+    }).catch(() => restorePane());
+  } else {
+    restorePane();
+  }
+  return true;
+}
+
 function renderVerify(res) {
+  // 本次是否精检结果
+  const incomingExact = res?.check_level === 'exact'
+    || (res?.interferences || []).some((h) => h.volume_mm3 !== undefined);
+  if (incomingExact) {
+    // 精检结果：成为当前权威列表并落存储（刷新后可恢复）
+    state.exactResult = res;
+    state.verifyStale = false;
+    saveExactResult(res);
+  } else if (state.exactResult?.check_level === 'exact') {
+    // bbox 粗筛（步骤改动后的自动预览）到来时，已有精检结果 → 不覆盖丢弃，
+    // 继续展示精检列表（逐处处理干涉不丢），仅标记过期；几何已由调用方先行刷新
+    state.verifyStale = true;
+    res = state.exactResult;
+  }
   const hits = res?.interferences || [];
   const edited = res?.edited_templates || [];
-  // check_level 缺省时（历史 409 payload 无此字段）以 hits 是否带
-  // volume 判定：带体积的是布尔精检结果
   const isExact = res?.check_level === 'exact'
     || hits.some((h) => h.volume_mm3 !== undefined);
   // 干涉卡片
@@ -727,15 +843,23 @@ function renderVerify(res) {
     const ok = document.createElement('div'); ok.className = 'verify-ok';
     const scope = edited.length ? `（已编辑 ${edited.length} 模板）` : '';
     ok.textContent = isExact
-      ? `✓ 精检无干涉${scope}`
+      ? (state.verifyStale
+        ? `✓ 精检无干涉（已过期）${scope}`
+        : `✓ 精检无干涉${scope}`)
       : `✓ 快速粗筛无碰撞${scope}`;
     interferenceBox.appendChild(ok);
-    setVerifyHint(isExact ? '精检无干涉' : '粗筛无碰撞（AABB 级）', 'ok');
+    setVerifyHint(isExact
+      ? (state.verifyStale ? '精检无干涉（步序已变，已过期）' : '精检无干涉')
+      : '粗筛无碰撞（AABB 级）', isExact ? (state.verifyStale ? 'warn' : 'ok') : 'ok');
   } else if (isExact) {
-    setVerifyHint(`${hits.length} 处干涉（布尔精检）`, 'error');
+    setVerifyHint(state.verifyStale
+      ? `${hits.length} 处干涉（精检 · 步序已变，已过期）`
+      : `${hits.length} 处干涉（布尔精检）`,
+      state.verifyStale ? 'warn' : 'error');
     hits.forEach((h) => {
       const r = document.createElement('div'); r.className = 'verify-item err';
       r.textContent = `${h.a.name} ↔ ${h.b.name}：穿透 ${h.volume_mm3} mm³`;
+      r.addEventListener('click', () => focusInterference(h));   // 点击高亮对应零件
       interferenceBox.appendChild(r);
     });
   } else {
@@ -744,6 +868,7 @@ function renderVerify(res) {
     hits.forEach((h) => {
       const r = document.createElement('div'); r.className = 'verify-item warn';
       r.textContent = `${h.a.name} ↔ ${h.b.name}：可能碰撞`;
+      r.addEventListener('click', () => focusInterference(h));   // 点击高亮对应零件
       interferenceBox.appendChild(r);
     });
   }
@@ -782,13 +907,17 @@ function renderVerifyPane(box) {
   const hint = document.createElement('div'); hint.className = 'verify-hint info';
   hint.textContent = $('#verify-hint')?.textContent || '';
   box.appendChild(hint);
-  const hits = state.lastPreview?.interferences || [];
-  const isExact = state.lastPreview?.check_level === 'exact';
+  // 优先展示精检结果（与右栏一致：步骤改动后仍保留精检列表）；否则用最近预览
+  const src = state.exactResult?.check_level === 'exact' ? state.exactResult : state.lastPreview;
+  const hits = src?.interferences || [];
+  const isExact = src?.check_level === 'exact'
+    || hits.some((h) => h.volume_mm3 !== undefined);
   if (hits.length) {
     hits.forEach((h) => {
       const r = document.createElement('div');
       r.className = `verify-item ${isExact ? 'err' : 'warn'}`;
       r.textContent = `${h.a.name} ↔ ${h.b.name}`;
+      r.addEventListener('click', () => focusInterference(h));   // 点击高亮对应零件
       box.appendChild(r);
     });
   } else {
@@ -796,6 +925,12 @@ function renderVerifyPane(box) {
     ok.textContent = isExact ? '✓ 精检无干涉' : '✓ 粗筛无碰撞';
     box.appendChild(ok);
   }
+  const reset = document.createElement('button');
+  reset.className = 'rail-btn drawer-reset';
+  reset.textContent = '重置检查';
+  reset.title = '丢弃当前检查结果，回到自动粗筛';
+  reset.addEventListener('click', () => resetVerify());
+  box.appendChild(reset);
 }
 
 function setVerifyHint(text, level = 'info') {
@@ -809,6 +944,7 @@ setVerifyHint('等待草稿步骤变更…（自动检查为 AABB 快速粗筛�
 // 精确检查按钮：显式触发布尔精检（自动粗筛只做 AABB 提示；
 // 确认保存的后端守门也始终 exact）
 $('#verify-exact').addEventListener('click', () => runPreview('exact'));
+$('#verify-reset').addEventListener('click', () => resetVerify());
 
 // ==========================================================================
 // M5：FEA 基线 vs 草稿双跑对比 + 差异摘要
@@ -1067,6 +1203,7 @@ $('#sess-abandon').addEventListener('click', async () => {
   state.lastPreview = null;
   state.feaResult = null;
   state.feaStale = false;
+  clearExactResult();
   renderDraftSteps();
   renderVerify({ interferences: [], edited_templates: [] });
   updateSessionHeader();
@@ -1376,6 +1513,7 @@ async function reloadDraftFromServer(fromAgent) {
       state.dirty = false;
       state.feaResult = null;
       state.feaStale = false;
+      clearExactResult();
       renderDraftSteps();
       renderVerify({ interferences: [], edited_templates: [] });
       schedulePreview();
