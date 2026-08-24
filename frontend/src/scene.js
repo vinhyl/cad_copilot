@@ -2,7 +2,6 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
-import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import { TransformControls } from 'three/addons/controls/TransformControls.js';
 
 const BASE_COLOR = new THREE.Color(0xffffff);
@@ -11,6 +10,25 @@ const SELECT_COLOR = new THREE.Color(0xff8a3d);
 const INTERFERENCE_COLOR_A = new THREE.Color(0xff00c8);
 const INTERFERENCE_COLOR_B = new THREE.Color(0x00c8ff);
 const ZERO_SCALE = new THREE.Matrix4().makeScale(0, 0, 0);
+
+// 显示/模型配色：每套预设 = 模型表面色(modelColor) + 背景(bg) + 平滑渐变环境 + 强度/曝光。
+// 关键两点根治"一团灰"与"过曝"：
+//   1) 材质改为哑光（metalness≈0.2, roughness≈0.5，见 load()）——金属只反射环境、不吃方向光，
+//      正是它让渐变环境反射成均匀灰、且把白金属面在亮角度过曝。哑光后方向光真正给模型上明暗，
+//      颜色以漫反射显示，灰与过曝一并消失。
+//   2) modelColor 为低亮度/低饱和色（非纯白），观感上缓和白色高光的刺眼；null=保留导出原色。
+// 环境仍为平滑渐变（无 RoomEnvironment 硬光斑）且随相机旋转屏幕锁定（见渲染循环）。
+const THEMES = {
+  // 模型配色：只改模型表面色(modelColor)；背景(bg)统一为固定深色中性、不参与切换，
+  // 否则背景随模型色走会让模型与背景同色、模型不显眼。环境渐变保留与各色呼应（仅影响
+  // 哑光面的微弱反射，不决定背景），让配色整体协调又不损失对比度。
+  neutral: { modelColor: null,       bg: 0x1c1c20, envTop: 0xb9bcc4, envMid: 0x808890, envBot: 0x3c3e46, intensity: 0.55, exposure: 1.0  },
+  slate:   { modelColor: 0x9aa0aa,   bg: 0x1c1c20, envTop: 0x9aa0aa, envMid: 0x6a7180, envBot: 0x2a2d34, intensity: 0.5,  exposure: 1.0  },
+  steel:   { modelColor: 0x6f7d92,   bg: 0x1c1c20, envTop: 0x8a98ad, envMid: 0x586478, envBot: 0x202632, intensity: 0.5,  exposure: 1.0  },
+  sand:    { modelColor: 0xb6a888,   bg: 0x1c1c20, envTop: 0xc2b393, envMid: 0x8a7d5e, envBot: 0x2e281d, intensity: 0.5,  exposure: 1.0  },
+  olive:   { modelColor: 0x7d8676,   bg: 0x1c1c20, envTop: 0x9aa08a, envMid: 0x68705c, envBot: 0x23271c, intensity: 0.5,  exposure: 1.0  },
+  ivory:   { modelColor: 0xd8d2c4,   bg: 0x1c1c20, envTop: 0xe2ddce, envMid: 0xb0a99a, envBot: 0x33322c, intensity: 0.5,  exposure: 0.95 },
+};
 
 /**
  * 3D 视口（ADR-0002 D3 + Phase B 视图操作集）。
@@ -33,6 +51,10 @@ export class AssemblyScene {
     this.container = container;
     this.renderer = new THREE.WebGLRenderer({ antialias: true });
     this.renderer.setPixelRatio(window.devicePixelRatio);
+    // 色调映射：NeutralToneMapping 把亮度>1.0 的高光柔和回退（而非硬削成纯白），
+    // 消除金属反射/顶光在部分角度的过曝；同时尽量保留材质本色，适合 CAD 读图。
+    this.renderer.toneMapping = THREE.NeutralToneMapping;
+    this.renderer.toneMappingExposure = 1.0;
     this.renderer.localClippingEnabled = true;
     container.appendChild(this.renderer.domElement);
 
@@ -45,14 +67,29 @@ export class AssemblyScene {
       if (this.cameraChangeCb) this.cameraChangeCb();
     });
 
-    this.scene.add(new THREE.HemisphereLight(0xffffff, 0x3a3a44, 1.1));
-    const dir = new THREE.DirectionalLight(0xffffff, 1.4);
-    dir.position.set(50, 80, 30);
-    this.scene.add(dir);
-    // OCP 导出的 glTF 材质 metalness/roughness 常为 1.0：无环境贴图时
-    // 金属面渲染成暗色。RoomEnvironment 提供中性 PBR 环境光修正此问题。
-    const pmrem = new THREE.PMREMGenerator(this.renderer);
-    this.scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+    // 光照策略：OCP 导出材质多为金属（metalness≈1），金属只反射环境、不吃方向光漫反射，
+    // 这导致(1)渐变环境反射成均匀灰、(2)白金属面在亮角度过曝。加载时（load()）已把材质
+    // 改为哑光（metalness≈0.2, roughness≈0.5），方向光因此真正给模型上明暗、颜色以漫反射
+    // 显示——灰与过曝一并消失。环境贴图仍随相机旋转屏幕锁定（见渲染循环），提供柔和顶光渐变；
+    // 主光/补光为跟随相机的"屏幕顶光/侧补光"，保证任意视角明暗一致、绝不世界顶亮底暗。
+    // 模型配色（modelColor/背景/强度/曝光）见 setModelColor 与工具栏"配色"按钮。
+    this._envTextures = {};          // 主题环境贴图缓存（按预设名，避免每次切换重建 PMREM）
+    this.currentTheme = 'neutral';
+    this.currentModelColor = null;   // null = 保留导出原色；否则为预设的模型表面色
+    this.setModelColor('neutral');   // 默认：哑光材质 + 平滑渐变环境，无硬光斑、无过曝
+    // 主光（key）：每帧相对相机上方 → 模型中心，屏幕锁定的顶光，给模型主明暗
+    this.dirLight = new THREE.DirectionalLight(0xffffff, 1.0);
+    this.scene.add(this.dirLight);
+    this.scene.add(this.dirLight.target);   // target 须入场景图，世界矩阵才会更新
+    // 补光（fill）：每帧相对相机侧下方 → 模型中心，柔化主光背侧的死黑
+    this.fillLight = new THREE.DirectionalLight(0xffffff, 0.5);
+    this.scene.add(this.fillLight);
+    this.scene.add(this.fillLight.target);
+    // 环境光（均匀，无方向）：兜底填充，避免背光面死黑；不引入顶/底偏置
+    this.ambient = new THREE.AmbientLight(0xffffff, 0.35);
+    this.scene.add(this.ambient);
+    // 环境贴图每帧跟随相机旋转（见渲染循环），使金属反射相对屏幕固定
+    this._envEuler = new THREE.Euler();
 
     this.group = new THREE.Group();
     this.scene.add(this.group);
@@ -106,12 +143,82 @@ export class AssemblyScene {
     new ResizeObserver(() => this._resize()).observe(container);
     this.renderer.setAnimationLoop(() => {
       this.controls.update();
+      // 环境贴图跟随相机旋转：金属反射的"上亮下暗"始终相对屏幕固定，绝不世界顶亮底暗
+      this._envEuler.setFromQuaternion(this.camera.quaternion);
+      this.scene.environmentRotation.copy(this._envEuler);
+      // 主光：相机上方一点 → 模型中心（相对视角的"顶光"，保留正常明暗层次）
+      this.dirLight.position.copy(this.camera.position)
+        .add(this.camera.up.clone().multiplyScalar(40));
+      this.dirLight.target.position.copy(this.controls.target);
+      this.dirLight.target.updateMatrixWorld();
+      // 补光：相机侧下方一点 → 模型中心，柔化主光背侧的死黑，仍完全跟视角
+      this.fillLight.position.copy(this.camera.position)
+        .add(this.camera.up.clone().multiplyScalar(-15))
+        .add(this._cameraRight().multiplyScalar(20));
+      this.fillLight.target.position.copy(this.controls.target);
+      this.fillLight.target.updateMatrixWorld();
       this.renderer.render(this.scene, this.camera);
     });
     this._bindPick();
   }
 
   onPick(cb) { this.pickHandler = cb; }
+
+  /** 应用模型配色：设置模型表面色(modelColor) + 背景 + 平滑渐变环境 + 强度/曝光。
+   * modelColor 为 null 时保留各模板导出原色；否则统一染成该低亮度色（缓和过曝刺眼）。
+   * 可在加载前后任意时刻调用；预设名记入 currentTheme / currentModelColor。 */
+  setModelColor(name) {
+    const t = THEMES[name] || THEMES.neutral;
+    this.currentTheme = name;
+    this.currentModelColor = t.modelColor ?? null;
+    this.scene.background = new THREE.Color(t.bg);
+    if (!this._envTextures[name]) this._envTextures[name] = this._buildEnvTexture(t);
+    this.scene.environment = this._envTextures[name];
+    this.scene.environmentIntensity = t.intensity;
+    this.renderer.toneMappingExposure = t.exposure;
+    this._applyModelColor();
+  }
+
+  /** 把当前模型配色染到场景内材质：null=还原导出原色（首次染前会存一份原色备份）。
+   * 哑光材质下 material.color 即为所见表面色；与 instanceColor(选中高亮)相乘生效。 */
+  _applyModelColor() {
+    if (!this.group) return;   // 构造早期 group 尚未创建时（如默认 setModelColor）跳过
+    const color = this.currentModelColor;
+    for (const child of this.group.children) {
+      const mats = Array.isArray(child.material) ? child.material : [child.material];
+      mats.forEach((m) => {
+        if (!m || !m.color) return;
+        if (color == null) {
+          if (m.userData._origColor) m.color.copy(m.userData._origColor);
+        } else {
+          if (!m.userData._origColor) m.userData._origColor = m.color.clone();
+          m.color.set(color);
+        }
+        m.needsUpdate = true;
+      });
+    }
+  }
+
+  /** 由主题生成平滑渐变环境贴图（垂直：顶亮 → 中 → 底暗）。
+   * 关键：无 RoomEnvironment 那种硬光面板，金属反射是平滑渐变，任何角度都不会
+   * 出现单一过曝亮斑；配合渲染循环的 environmentRotation 随相机旋转即屏幕锁定。 */
+  _buildEnvTexture(theme) {
+    const c = document.createElement('canvas');
+    c.width = 16; c.height = 256;
+    const ctx = c.getContext('2d');
+    const g = ctx.createLinearGradient(0, 0, 0, 256);
+    g.addColorStop(0.0, '#' + new THREE.Color(theme.envTop).getHexString());
+    g.addColorStop(0.5, '#' + new THREE.Color(theme.envMid).getHexString());
+    g.addColorStop(1.0, '#' + new THREE.Color(theme.envBot).getHexString());
+    ctx.fillStyle = g; ctx.fillRect(0, 0, 16, 256);
+    const tex = new THREE.CanvasTexture(c);
+    tex.mapping = THREE.EquirectangularReflectionMapping;
+    tex.colorSpace = THREE.SRGBColorSpace;
+    const pmrem = new THREE.PMREMGenerator(this.renderer);
+    const env = pmrem.fromEquirectangular(tex).texture;
+    tex.dispose(); pmrem.dispose();
+    return env;
+  }
 
   async load(manifest, baseUrl) {
     // 重载同一装配（preview 刷新 / 放弃草稿回基线）时保留用户相机，
@@ -151,6 +258,10 @@ export class AssemblyScene {
       const meshes = [];
       gltf.scene.traverse((o) => { if (o.isMesh) meshes.push(o); });
       const { geometry, material } = this._mergeTemplateMeshes(meshes);
+      // 哑光化：金属材质会反射环境成灰、且白面过曝；降到 metalness≈0.2 让方向光真正
+      // 给模型上明暗、颜色以漫反射显示。roughness 适度，保留一点高光质感而非全哑。
+      material.metalness = 0.2;
+      material.roughness = 0.5;
 
       const inst = new THREE.InstancedMesh(geometry, material, nodes.length);
       inst.userData.templateId = tid;
@@ -169,6 +280,7 @@ export class AssemblyScene {
       this.templateBoxes.set(tid, geometry.boundingBox.clone());
       this.group.add(inst);
     }
+    this._applyModelColor();   // 应用当前模型配色到刚构建的材质（新建/重载都生效）
 
     // 预计算每实例的累积爆炸向量（自身 + 全部祖先的相对向量之和）
     const accOf = (nodeId) => {
@@ -485,6 +597,12 @@ export class AssemblyScene {
   // ------------------------------------------------------------------
   // internals
   // ------------------------------------------------------------------
+
+  /** 相机右向（世界坐标），用于补光相对相机的偏移。 */
+  _cameraRight() {
+    const e = this.camera.matrixWorld.elements;
+    return new THREE.Vector3(e[0], e[1], e[2]).normalize();
+  }
 
   _clearOverlay() {
     for (const child of [...this.overlay.children]) {

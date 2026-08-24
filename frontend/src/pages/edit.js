@@ -8,6 +8,7 @@
 
 import '../style.css';
 import { AssemblyScene } from '../scene.js';
+import { installThemeControls } from '../shared/theme.js';
 import { AssemblyTree } from '../tree.js';
 import {
   getToken, setToken,
@@ -136,6 +137,7 @@ async function loadBaseline() {
 // ==========================================================================
 const sceneBaseline = new AssemblyScene(document.getElementById('vp-base'));
 const sceneDraft    = new AssemblyScene(document.getElementById('vp-draft'));
+installThemeControls([sceneBaseline, sceneDraft], document.querySelector('.pane-tools'));
 const treeBaseline = new AssemblyTree(document.getElementById('tree-base'), {
   onSelect: () => {}, onToggle: () => {},
 });

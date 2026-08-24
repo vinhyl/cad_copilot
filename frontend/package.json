@@ -9,7 +9,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "three": "0.160.0"
+    "three": "^0.163.0"
   },
   "devDependencies": {
     "vite": "^5.4.0"

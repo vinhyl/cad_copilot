@@ -8,6 +8,7 @@
 import '../style.css';
 import { AssemblyScene } from '../scene.js';
 import { AssemblyTree } from '../tree.js';
+import { installThemeControls } from '../shared/theme.js';
 import {
   getToken, setToken,
   parseAssembly, viewAssembly, listVersions, auditAssembly, importDrawing,
@@ -30,6 +31,7 @@ ensureToken();
 
 const $ = (s) => document.querySelector(s);
 const scene = new AssemblyScene(document.getElementById('viewport'));
+installThemeControls([scene], document.getElementById('toolbar'));
 const tree = new AssemblyTree(document.getElementById('tree'), {
   onSelect: (id) => selectNode(id),
   onToggle: (visMap) => scene.applyVisibility(visMap),

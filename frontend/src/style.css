@@ -248,6 +248,14 @@ html, body {
   color: #fff;
 }
 
+/* 显示主题按钮（首页 + 编辑页双视口共用） */
+.theme-btn {
+  padding: 3px 10px; border: 1px solid #3a3a44; border-radius: 6px;
+  background: #26262e; color: #cfcfd8; font-size: 12px; cursor: pointer;
+}
+.theme-btn:hover { background: #32323c; }
+.theme-btn.active { background: #4b3fe3; border-color: #4b3fe3; color: #fff; }
+
 #toolbar input[type="range"] { width: 110px; accent-color: #4b3fe3; }
 
 /* ---- token 引导页（无授权浏览器首次打开时；M6） ---- */
