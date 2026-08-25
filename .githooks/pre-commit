@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# 仅当 frontend 源码变动时，运行 dist 同步校验，避免每次提交都跑慢速前端构建。
+set -euo pipefail
+ROOT="$(git rev-parse --show-toplevel)"
+
+if git diff --cached --name-only | grep -qE '^frontend/(src/|index\.html|edit\.html|drawing\.html|report\.html|package\.json|package-lock\.json|vite\.config\.js)'; then
+  echo "[pre-commit] frontend 源码变动 -> 校验 dist 同步"
+  "$ROOT/scripts/check-dist-sync.sh"
+else
+  echo "[pre-commit] 无 frontend 源码变动 -> 跳过 dist 校验"
+fi

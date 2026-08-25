@@ -20,7 +20,8 @@ jobs:
 
       - name: Set up Python 3.13
         uses: actions/setup-python@v7
-        python-version: "3.13"
+        with:
+          python-version: "3.13"
 
       - name: Bootstrap venv + dependencies
         run: python bootstrap.py
@@ -50,4 +51,16 @@ jobs:
         run: |
           if [ "$RUNNER_OS" = "Windows" ]; then PY="venv/Scripts/python"; else PY="venv/bin/python"; fi
           "$PY" -m pytest tests/ -q
+        shell: bash
+
+  frontend-dist:
+    name: frontend dist consistency
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Verify frontend/dist matches src
+        run: bash scripts/check-dist-sync.sh
         shell: bash

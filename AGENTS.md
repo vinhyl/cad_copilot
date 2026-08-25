@@ -80,6 +80,21 @@ token 是**入口身份的硬标记，优先于用户措辞**。agent 每轮先�
 或双击 `start_cad_service.command`；Windows 可建计划任务 / 开机脚本，或会话内直接 `bash cad_service_ctl.sh start`。
 主动停止用 `bash cad_service_ctl.sh stop`（跨平台，自动按 OS 选 `lsof` / `netstat`+`taskkill`）。）
 
+## 前端 dist 必须与 src 同步（硬性规则）
+
+`frontend/dist` 是随仓库提交的成品，`cad_service.py` 直接 serve 它（运行期与
+`node_modules` 完全解耦）。它**必须**由 `frontend/src` 经 `npm run build` 重建而来，
+**绝不**手改 dist、也绝不提交"和 src 对不上的 dist"。
+
+- 提交前端改动前：`cd frontend && npm ci && npm run build`，确认
+  `git diff --quiet HEAD -- frontend/dist` 为空（无新增/改动/删除的 chunk）后再 `git add`。
+- 一致性校验脚本：`scripts/check-dist-sync.sh`（npm ci + build + 比对 dist 与 HEAD）。
+  - CI 的 `frontend-dist` job 对每次 push/PR 都跑，dist 不同步直接红。
+  - 本机预装 hook：`.githooks/pre-commit`（`git config core.hooksPath .githooks` 启用）；
+    frontend 源码变动时自动拦截"未重建的 dist"。
+- 根因教训：曾提交过与 src 对不上的 dist（dist 重做 DOM、src 仍按旧 id 找元素），
+  导致编辑页功能静默失效。详见历史反面案例（提交 1820116）。
+
 ## 其它约定
 
 - 几何能力也可经 MCP（`cad_mcp_server.py`，18 工具）调用；**落版本永远留给用户在 Web UI 点确认**。
