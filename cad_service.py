@@ -428,6 +428,7 @@ def create_app(token: str | None = None,
         key = cad_assembly._sha256_file(src)[:16]
         cache_dir = os.path.join(cache_root, key)
         tree_json = os.path.join(cache_dir, "tree_structure.json")
+        _unhide_key(key)   # 重开同文件=恢复显示（若该会话曾被清空隐藏）
         force = bool(body.get("force"))
 
         if not force and os.path.isfile(tree_json):
@@ -474,6 +475,7 @@ def create_app(token: str | None = None,
                 return JSONResponse({"error": "cache_key required"},
                                     status_code=400)
             cache_dir, _ = _edit_context(key)   # 校验 cache 存在
+            _unhide_key(key)   # 按 cache_key 直载=恢复显示（若曾被清空隐藏）
         except PermissionError as e:
             return JSONResponse({"error": str(e)}, status_code=401
                                 if "token" in str(e) else 403)
@@ -1323,11 +1325,46 @@ def create_app(token: str | None = None,
             rec = json.load(f)
         return JSONResponse(_selection_enriched(rec))
 
+    # ---- 隐藏清单（M6.5）："清空记录"只隐藏装配会话、保留渲染缓存 ----
+    # 装配"最近使用"记录 = 服务端 cache_root/<key>/ 目录本身；若清空列表时直接删
+    # 目录会误删昂贵的 3D 渲染缓存。故引入轻量隐藏清单：清空=把 cache_key 记进
+    # .hidden_sessions.json，/api/sessions 过滤之；重开同文件（命中既有缓存）时
+    # 自动移出清单恢复显示——与 DWG"清指针留文件"语义一致。
+    _HIDDEN_FILE = os.path.join(workspace, ".hidden_sessions.json")
+
+    def _load_hidden():
+        try:
+            with open(_HIDDEN_FILE, encoding="utf-8") as f:
+                return set((json.load(f) or {}).get("keys", []))
+        except (FileNotFoundError, ValueError):
+            return set()
+
+    def _save_hidden(keys):
+        tmp = _HIDDEN_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({"keys": sorted(keys)}, f)
+        os.replace(tmp, _HIDDEN_FILE)
+
+    def _hide_keys(keys):
+        keys = set(keys)
+        if not keys:
+            return
+        hidden = _load_hidden()
+        hidden.update(keys)
+        _save_hidden(hidden)
+
+    def _unhide_key(key):
+        hidden = _load_hidden()
+        if key in hidden:
+            hidden.discard(key)
+            _save_hidden(hidden)
+
     async def sessions_list(request):
         """GET /api/sessions -- 活跃会话发现（M6，agent 入口）。
 
         扫描 cache 目录，每个会话返回源文件、当前版本、草稿步骤数、
-        最近活动时间（cache mtime）。按新→旧排序。
+        最近活动时间（cache mtime）。按新→旧排序。已隐藏（清空记录）的
+        会话不返回。
         """
         try:
             check_auth(request)
@@ -1335,8 +1372,11 @@ def create_app(token: str | None = None,
             return JSONResponse({"error": str(e)}, status_code=401
                                 if "token" in str(e) else 403)
         items = []
+        hidden = _load_hidden()
         if os.path.isdir(cache_root):
             for key in os.listdir(cache_root):
+                if key in hidden:
+                    continue
                 ck_dir = os.path.join(cache_root, key)
                 if not os.path.isfile(os.path.join(ck_dir,
                                                    "tree_structure.json")):
@@ -1364,6 +1404,32 @@ def create_app(token: str | None = None,
                     continue
         items.sort(key=lambda x: x["updated"], reverse=True)
         return JSONResponse({"sessions": items})
+
+    async def sessions_delete(request):
+        """DELETE /api/sessions -- 隐藏会话（保留渲染缓存）。
+
+        带 ``cache_key`` 隐藏单条；不带（清空记录）隐藏当前全部会话。
+        仅写入隐藏清单，绝不删除 cache_root/<key>/ 目录，因此 3D 渲染
+        缓存完好，重开同文件时自动恢复显示。
+        """
+        try:
+            check_auth(request)
+        except PermissionError as e:
+            return JSONResponse({"error": str(e)}, status_code=401
+                                if "token" in str(e) else 403)
+        cache_key = str(request.query_params.get("cache_key") or "").strip()
+        if cache_key:
+            _hide_keys([cache_key])
+        else:
+            # 清空记录：隐藏所有当前会话（幂等）
+            keys = []
+            if os.path.isdir(cache_root):
+                for key in os.listdir(cache_root):
+                    ck_dir = os.path.join(cache_root, key)
+                    if os.path.isfile(os.path.join(ck_dir, "tree_structure.json")):
+                        keys.append(key)
+            _hide_keys(keys)
+        return JSONResponse({"ok": True, "hidden_count": len(_load_hidden())})
 
     def _t_str(ts: float) -> str:
         import time as _t
@@ -1949,6 +2015,7 @@ def create_app(token: str | None = None,
         Route("/api/versions/checkout", versions_checkout, methods=["POST"]),
         Route("/api/plugins", plugins, methods=["GET"]),
         Route("/api/sessions", sessions_list, methods=["GET"]),
+        Route("/api/sessions", sessions_delete, methods=["DELETE"]),
         Route("/api/selection", selection_post, methods=["POST"]),
         Route("/api/selection", selection_get, methods=["GET"]),
         Route("/api/fea/static", fea_static, methods=["POST"]),

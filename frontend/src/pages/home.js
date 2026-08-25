@@ -13,7 +13,7 @@ import {
   getToken, setToken,
   parseAssembly, viewAssembly, listVersions, auditAssembly, importDrawing,
   getPlugins, getConfig, uploadFile, startFeaJob, startRenderJob,
-  getJob, cancelJob, postSelection, listSessions,
+  getJob, cancelJob, postSelection, listSessions, deleteSessions,
 } from '../api.js';
 import {
   consumeUrlBoot, ensureToken, loadAllowedDirs, pathDeniedMsg,
@@ -740,10 +740,16 @@ function renderRecent() {
     listEl.append(row);
   });
 }
-$('#recent-clear').addEventListener('click', () => {
-  // 只清本浏览器图纸历史；装配会话在服务端，无法从客户端清除
+$('#recent-clear').addEventListener('click', async () => {
+  // 图纸历史走本浏览器 localStorage；装配会话在服务端，调接口隐藏
+  // （仅记隐藏清单、保留渲染缓存，与 DWG"清指针留文件"语义一致）
   localStorage.setItem('cad_recent_files', JSON.stringify([]));
-  renderRecent();
+  try {
+    await deleteSessions();   // 不带 cache_key = 隐藏全部装配会话
+  } catch (e) {
+    console.warn('清空装配会话失败（服务端）：', e);
+  }
+  await refreshSessions();   // 重拉服务端会话列表并重渲染
 });
 refreshSessions();
 

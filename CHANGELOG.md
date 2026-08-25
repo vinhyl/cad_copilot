@@ -15,6 +15,10 @@
 - **删除后粗筛报错**：`replay_draft_shapes` 未跳过 `remove` 步骤，误入几何编辑校验（`operation must be drill|fillet|chamfer|scale`）。现在 `move`/`remove` 均跳过（实例级由 manifest 侧处理）。
 - **保存草稿报错 `step #N missing template_id/operation`**：`draft_save` 对实例级操作（`move`/`remove`，按 `node_id` 寻址）放宽校验，不再强制要求 `template_id`。
 
+### 修复 (Fixed)（最近使用「清空记录」现可清除装配会话，且保留渲染缓存）
+- **根因**：装配「最近使用」记录来自服务端会话列表（`GET /api/sessions` 扫描 `workspace/cache/<key>/`），而清空按钮只清浏览器 `localStorage`（图纸历史），故装配项（如 `selftest.step`）删不掉。
+- **修复**：新增服务端隐藏清单（`workspace/.hidden_sessions.json`）。「清空记录」= 图纸清 `localStorage` + 调 `DELETE /api/sessions` 把装配会话 `cache_key` 写入隐藏清单；列表过滤隐藏项，**渲染缓存目录 `cache_root/<key>/` 不删**（与 DWG「清指针留文件」语义一致）。重开任一被隐藏会话（命中既有缓存）自动从清单移除、恢复显示。支持逐条 `DELETE /api/sessions?cache_key=<key>` 隐藏。
+
 ### 变更 (Changed)（查看器光照与模型配色：视角锁定无过曝 + 哑光金属 + 低亮度配色）
 - **过曝根因修复**：OCP 导出材质多为金属（metalness≈1），只反射环境贴图、不吃方向光；
   原 `RoomEnvironment` 含硬光面板，金属在个别角度把亮面板反射成过曝亮斑。改为**平滑渐变

@@ -311,3 +311,18 @@ export async function listSessions() {
   if (!r.ok) { _guard401(r); throw new Error(body.error || `HTTP ${r.status}`); }
   return body;
 }
+
+/** 隐藏会话（DELETE /api/sessions）。带 cacheKey 隐藏单条；不带=隐藏全部。
+ *  仅记服务端隐藏清单，不删渲染缓存，与"清空记录"语义一致。 */
+export async function deleteSessions(cacheKey = '') {
+  const url = cacheKey
+    ? `/api/sessions?cache_key=${encodeURIComponent(cacheKey)}`
+    : '/api/sessions';
+  const r = await fetch(url, {
+    method: 'DELETE',
+    headers: { Authorization: `Bearer ${getToken()}` },
+  });
+  const body = await r.json().catch(() => ({}));
+  if (!r.ok) { _guard401(r); throw new Error(body.error || `HTTP ${r.status}`); }
+  return body;
+}
