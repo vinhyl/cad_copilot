@@ -22,7 +22,7 @@ REPO="$SCRIPT_DIR"
 GUEST_TOKEN="cad-guest-2026"
 DEV_TOKEN="cad-local-dev-2026"
 PORT=8764
-URL="http://127.0.0.1:${PORT}/app/drawing.html?token=${GUEST_TOKEN}"
+URL="http://127.0.0.1:${PORT}/app/index.html?token=${GUEST_TOKEN}"
 
 # ---- 按 OS 选择 venv 解释器与"打开浏览器"命令 ----
 OS="$(uname -s 2>/dev/null || echo unknown)"

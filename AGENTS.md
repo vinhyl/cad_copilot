@@ -47,7 +47,7 @@ token 是**入口身份的硬标记，优先于用户措辞**。agent 每轮先�
 4. **切换规则**：guest↔dev 由谁进哪个入口决定。agent 不擅自改 token；用户要开发动作但当前
    token 是 guest 时，说明需从 dev 入口（或明说"开发模式"）再操作。
 
-## 打开 / 处理图纸或 STEP 的标准流程（必须走这条）
+## 启动服务 / 打开页面的标准流程（必须走这条）
 
 1. **探活**：`bash cad_service_ctl.sh status`
    （等价：`curl -H "Authorization: Bearer cad-guest-2026" http://127.0.0.1:8764/api/config`
@@ -57,13 +57,19 @@ token 是**入口身份的硬标记，优先于用户措辞**。agent 每轮先�
    `exec <venv/python> cad_service.py`（venv 解释器按 OS 自动选择），该后台任务即服务进程本身；用普通命令前台跑会被
    命令结束杀掉。
 3. **打开页面**：`bash cad_service_ctl.sh open`
-   （自动调系统默认浏览器打开；若打开失败则把下方 URL 给用户）
+   （默认打开「首页」`index.html`；自动调系统默认浏览器打开；若打开失败则把下方 URL 给用户）
 
 ## 固定地址（默认 token 为 guest `cad-guest-2026`，dev 需显式）
 
-- 图纸对照：`http://127.0.0.1:8764/app/drawing.html?token=cad-guest-2026`
-- 装配预览：`http://127.0.0.1:8764/app/?token=cad-guest-2026&load=<encodeURIComponent(绝对路径)>`
-  或 `?cacheKey=<键>`
+- **首页（默认落地页）**：`http://127.0.0.1:8764/app/index.html?token=cad-guest-2026`
+  普通「启动服务」即进这里（文件列表 / 装配预览入口）。
+- **启动并打开某个具体文件**：在首页地址后追加
+  `&load=<encodeURIComponent(绝对路径)>` 或 `?cacheKey=<键>`，例如
+  `http://127.0.0.1:8764/app/index.html?token=cad-guest-2026&load=<encodeURIComponent(绝对路径)>`。
+  这是「启动服务并直接打开某份图纸 / 装配」时才用的方式，**不是默认**。
+- **图纸对照（二级视图）**：`http://127.0.0.1:8764/app/drawing.html?token=cad-guest-2026`
+- **编辑会话（二级视图）**：`http://127.0.0.1:8764/app/edit.html?token=cad-guest-2026`
+- **报告中心（二级视图）**：`http://127.0.0.1:8764/app/report.html?token=cad-guest-2026`
 
 ## 禁止（会导致服务起不来 / token 错配）
 
