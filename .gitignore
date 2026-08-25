@@ -44,5 +44,11 @@ mcp_test.py
 
 # ---- Frontend ----
 node_modules/
+# vite MPA 的四个入口 html 都是源码，必须进仓库（否则干净 checkout 无法构建）。
+# 注意：*.html 全局被忽略（第 15 行），这里逐一为 frontend 根目录的入口开例外；
+# 其余位置的生成/临时 html 仍忽略。
 !frontend/index.html
+!frontend/edit.html
+!frontend/drawing.html
+!frontend/report.html
 !frontend/dist/**

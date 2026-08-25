@@ -27,11 +27,10 @@ jobs:
         run: python bootstrap.py
         shell: bash
 
-      - name: Smoke test selftest.py (OCP read/properties/convert)
-        run: |
-          if [ "$RUNNER_OS" = "Windows" ]; then PY="venv/Scripts/python"; else PY="venv/bin/python"; fi
-          "$PY" selftest.py
-        shell: bash
+      # NOTE: the legacy `selftest.py` OCP read/properties/convert smoke is
+      # retired — it is now covered by the pytest suite (tests/test_selftest_e2e.py,
+      # run in the step below), which is the authoritative regression gate.
+      - name: Smoke test pick_features MCP tool (structured)
 
       - name: Smoke test pick_features MCP tool (structured)
         run: |
@@ -58,9 +57,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: "22"
       - name: Verify frontend/dist matches src
-        run: bash scripts/check-dist-sync.sh
+        run: bash scripts/check-dist-sync.sh --strict
         shell: bash

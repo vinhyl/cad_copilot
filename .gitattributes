@@ -6,3 +6,10 @@
 /vendor/three.module.min.js binary
 /vendor/jsm/controls/OrbitControls.js binary
 /vendor/jsm/loaders/STLLoader.js binary
+
+# Frontend source + built dist must be byte-identical on every platform so the
+# vite/esbuild build is reproducible. Windows' default autocrlf converts checked
+# -out .js/.html to CRLF, which changes esbuild's content hash and breaks the
+# "dist must match src" CI check on Linux runners. Force LF everywhere under
+# frontend/ so Windows and Linux build identical chunks.
+frontend/** text=auto eol=lf
