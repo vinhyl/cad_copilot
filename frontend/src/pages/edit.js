@@ -66,6 +66,7 @@ const state = {
   // 装配级编辑：操作域（领域 A 零件编辑 / 领域 B 装配操作）+ 目标实例 + 换件身份
   opDomain: 'part',                 // 'part'（零件编辑）| 'assembly'（装配操作）
   targetInstance: { nodeId: null, templateId: null },  // 3D 点选选中的实例
+  structureTarget: { nodeId: null, name: '', type: '' }, // 结构树点选的装配/分组
   replacedMap: {},                  // tid -> {name, source_cache_key}（换件后新零件名）
 };
 
@@ -138,11 +139,49 @@ async function loadBaseline() {
 const sceneBaseline = new AssemblyScene(document.getElementById('vp-base'));
 const sceneDraft    = new AssemblyScene(document.getElementById('vp-draft'));
 installThemeControls([sceneBaseline, sceneDraft], document.querySelector('.pane-tools'));
+// 结构树点选：记录 structureTarget（供解散分组），并同步对应 3D 视口取景。
+// treeDraft 额外启用拖拽（dnd）与分组工具条（toolbar）——结构重组只针对草稿侧。
+/** 结构树点选：零件 → 高亮+取景+同步编辑区目标（与搜索一致）；装配/分组 → 仅取景。 */
+function handleTreePick(tree, id) {
+  const rec = id ? tree.nodes.get(id) : null;
+  const node = rec?.node;
+  state.structureTarget = node
+    ? { nodeId: id, name: node.name || id, type: node.type }
+    : { nodeId: null, name: '', type: '' };
+  if (!id || !node) return;
+  if (node.type === 'part') {
+    highlightAndFocus([id], `结构树 → 高亮 ${node.name || id}`);
+  } else {
+    sceneBaseline.fitToIds([id]);
+    if (!camSync) sceneDraft.fitToIds([id]);
+  }
+}
 const treeBaseline = new AssemblyTree(document.getElementById('tree-base'), {
-  onSelect: () => {}, onToggle: () => {},
+  onSelect: (id) => handleTreePick(treeBaseline, id),
+  onToggle: () => {},
 });
-const treeDraft    = new AssemblyTree(document.getElementById('tree-draft'), {
-  onSelect: () => {}, onToggle: () => {},
+const treeDraft = new AssemblyTree(document.getElementById('tree-draft'), {
+  onSelect: (id) => handleTreePick(treeDraft, id),
+  onToggle: () => {},
+  dnd: { onDrop: (nodeId, parentId) => {
+    if (!state.baselineLoaded) return;
+    const rec = treeDraft.nodes.get(nodeId);
+    const tid = rec?.node?.template || null;
+    upsertAssemblyStep(nodeId, tid, 'reparent', { parent_id: parentId },
+      `${rec?.node?.name || nodeId}: 调层级 移至「${parentId}」`);
+  } },
+  toolbar: {
+    onGroupCreate: (parentId) => {
+      const gid = genGroupId();
+      upsertAssemblyStep(gid, null, 'group_create',
+        { name: '新分组', parent_id: parentId }, `新建分组「新分组」`);
+    },
+    onGroupDissolve: (nodeId) => {
+      const rec = treeDraft.nodes.get(nodeId);
+      upsertAssemblyStep(nodeId, null, 'group_dissolve', {},
+        `解散分组「${rec?.node?.name || nodeId}」`);
+    },
+  },
 });
 
 // ==========================================================================
@@ -162,6 +201,21 @@ function applyLayout(preset) {
 document.querySelectorAll('.layout-btn').forEach((b) => {
   b.addEventListener('click', () => applyLayout(b.dataset.layout));
 });
+// 结构树浮层开关：基线与草稿两视口的树同步显隐
+const treeToggleBtn = document.getElementById('tree-toggle');
+if (treeToggleBtn) {
+  const toggleTree = () => {
+    ['tree-base', 'tree-draft'].forEach((id) => {
+      const el = document.getElementById(id);
+      if (!el) return;
+      el.classList.remove('hidden');
+      el.classList.toggle('show');
+    });
+    treeToggleBtn.classList.toggle('active');
+  };
+  treeToggleBtn.addEventListener('click', toggleTree);
+}
+
 const abToggle = document.getElementById('ab-toggle');
 if (abToggle) {
   abToggle.addEventListener('click', () => {
@@ -260,6 +314,12 @@ function stepFallbackTitle(s) {
     const name = stepNodeName(s.node_id, s.template_id);
     return `${name}: 换件 来源 ${String(p.source_cache_key || '?').slice(0, 6)}/${p.source_template_id || '?'}`;
   }
+  if (s.operation === 'reparent') {
+    const pid = p.parent_id || '?';
+    return `${stepNodeName(s.node_id, s.template_id)}: 层级 移至「${pid}」`;
+  }
+  if (s.operation === 'group_create') return `新建分组「${p.name || s.node_id || '?'}」`;
+  if (s.operation === 'group_dissolve') return `解散分组「${stepNodeName(s.node_id, s.template_id)}」`;
   return `${tplDisplayName(s.template_id, s.template_id)}: ${s.operation}`;
 }
 
@@ -331,6 +391,30 @@ function stepCardData(s) {
       kind: 'replace', type: '换件',
       target: `类 ${tplDisplayName(s.template_id, s.template_id)}`,
       detail: `对齐=${p.align || 'base'}`,
+    };
+  }
+  if (s.operation === 'reparent') {
+    const pid = p.parent_id || '?';
+    const prec = treeBaseline.nodes.get(pid);
+    const pname = prec?.node?.name || (pid.startsWith('g') ? `分组 ${pid}` : pid);
+    return {
+      kind: 'structure', type: '调层级',
+      target: `件 ${stepNodeName(s.node_id, s.template_id)}`,
+      detail: `移至「${pname}」`,
+    };
+  }
+  if (s.operation === 'group_create') {
+    return {
+      kind: 'structure', type: '新建分组',
+      target: p.name || s.node_id || '?',
+      detail: '',
+    };
+  }
+  if (s.operation === 'group_dissolve') {
+    return {
+      kind: 'structure', type: '解散分组',
+      target: stepNodeName(s.node_id, s.template_id),
+      detail: '子节点上提一级',
     };
   }
   const opLabel = (FEATURE_OPS[s.operation] || {}).label || s.operation;
@@ -417,7 +501,8 @@ function renderDraftSteps(targetBox) {
 function buildStepRow(s, ordinal) {
   const cd = stepCardData(s);
   const row = document.createElement('div'); row.className = 'step';
-  const isAssembly = s.node_id && (s.operation === 'move' || s.operation === 'replace');
+  const isAssembly = s.node_id && (s.operation === 'move' || s.operation === 'replace'
+                                      || s.operation === 'reparent' || s.operation === 'group_dissolve');
   if (isAssembly) row.classList.add('step-assembly');
   const top = document.createElement('div'); top.className = 'step-top';
   const no = document.createElement('span'); no.className = 'no'; no.textContent = `${ordinal}`;
@@ -495,6 +580,23 @@ const ASSEMBLY_OPS = {
   },
   remove: {
     label: '删除零件', instance: true,
+    fields: [],
+  },
+  reparent: {
+    label: '调整层级（移到其它装配/分组下）', instance: true, structure: true,
+    fields: [
+      { key: 'parent_id', label: '新父节点', type: 'parent', hint: '选父装配/分组；也可在结构树直接拖拽' },
+    ],
+  },
+  group_create: {
+    label: '新建分组', instance: true, structure: true,
+    fields: [
+      { key: 'name', label: '分组名', type: 'text', def: '新分组' },
+      { key: 'parent_id', label: '放置位置', type: 'parent-base', hint: '在哪个装配下新建空分组' },
+    ],
+  },
+  group_dissolve: {
+    label: '解散分组（子节点上提）', instance: true, structure: true,
     fields: [],
   },
 };
@@ -689,7 +791,62 @@ function renderAssemblyParams(box, def) {
       input.id = `sf-p-${f.key}`;
       row.append(lab, input);
       box.appendChild(row);
+    } else if (f.type === 'text') {
+      const row = document.createElement('div'); row.className = 'sf-row';
+      const lab = document.createElement('label'); lab.textContent = f.label;
+      const input = document.createElement('input');
+      input.type = 'text'; input.value = f.def ?? '';
+      input.id = `sf-p-${f.key}`;
+      row.append(lab, input);
+      box.appendChild(row);
+    } else if (f.type === 'parent' || f.type === 'parent-base') {
+      // 「新父节点」下拉：枚举草稿结构树中的装配节点（自动降级到基线树）。
+      // parent       —— reparent：排除目标自身及后代
+      // parent-base —— group_create：任意装配（含根）均可作为放置位置
+      const row = document.createElement('div'); row.className = 'sf-row';
+      const lab = document.createElement('label'); lab.textContent = f.label;
+      const sel = document.createElement('select'); sel.id = `sf-p-${f.key}`;
+      row.append(lab, sel);
+      box.appendChild(row);
+      const exclude = f.type === 'parent' ? (state.targetInstance.nodeId || null) : null;
+      populateParentOptions(sel, exclude);
     }
+  }
+}
+
+/**
+ * 用当前草稿结构树（未 preview 时回退基线树）填充装配节点下拉。
+ * @param excludeId reparent 时排除目标自身及其后代（不能移入自身/后代下）
+ */
+function populateParentOptions(sel, excludeId) {
+  const src = treeDraft.nodes.size ? treeDraft.nodes : treeBaseline.nodes;
+  const items = [];
+  const isDescOf = (id, anc) => {
+    let cur = id;
+    while (cur) {
+      if (cur === anc) return true;
+      cur = (src.get(cur)?.parentId) ?? null;
+    }
+    return false;
+  };
+  const rootId = [...src.values()].find((r) => r.parentId == null)?.node?.id;
+  for (const [id, rec] of src) {
+    if (rec.node.type !== 'assembly') continue;
+    if (id === excludeId || (excludeId && isDescOf(id, excludeId))) continue;
+    const depth = (() => {
+      let d = 0, cur = rec.parentId;
+      while (cur) { d++; cur = src.get(cur)?.parentId ?? null; }
+      return d;
+    })();
+    const indent = '　'.repeat(Math.min(depth, 6));
+    const isRoot = id === rootId;
+    items.push({ id, label: `${indent}${rec.node.name || id}${isRoot ? '（根）' : ''}` });
+  }
+  sel.innerHTML = '<option value="">（请选择父装配）</option>';
+  for (const it of items) {
+    const o = document.createElement('option');
+    o.value = it.id; o.textContent = it.label;
+    sel.appendChild(o);
   }
 }
 
@@ -1019,11 +1176,6 @@ $('#btn-add-step').addEventListener('click', () => {
 
 /** 领域 B：生成/覆盖一条装配级步骤（replace / move），作用于选中的实例。 */
 function addAssemblyStep(opKey) {
-  const { nodeId, templateId } = state.targetInstance;
-  if (!nodeId || !templateId) {
-    setFormHint('请先在 3D 视口点选目标零件', 'error');
-    return;
-  }
   const def = ASSEMBLY_OPS[opKey];
   if (!def) { setFormHint('请先选择操作', 'error'); return; }
   const readNum = (key) => {
@@ -1031,6 +1183,43 @@ function addAssemblyStep(opKey) {
     const v = el ? parseFloat(el.value) : 0;
     return Number.isFinite(v) ? v : 0;
   };
+
+  // 结构操作 · 新建分组：无需 3D 点选，只需 分组名 + 放置父装配
+  if (opKey === 'group_create') {
+    const nameEl = document.getElementById('sf-p-name');
+    const parentEl = document.getElementById('sf-p-parent_base');
+    const name = (nameEl?.value || '').trim() || '新分组';
+    const parentId = parentEl?.value || null;
+    if (!parentId) { setFormHint('请选择分组放置位置（父装配）', 'error'); return; }
+    const gid = genGroupId();
+    upsertAssemblyStep(gid, null, 'group_create', { name, parent_id: parentId },
+      `新建分组「${name}」`);
+    return;
+  }
+  // 结构操作 · 解散分组：目标为草稿结构树中点选的分组
+  if (opKey === 'group_dissolve') {
+    const st = state.structureTarget || {};
+    if (!st.nodeId) { setFormHint('请先在草稿结构树点选要解散的分组', 'error'); return; }
+    upsertAssemblyStep(st.nodeId, null, 'group_dissolve', {},
+      `解散分组「${st.name || st.nodeId}」`);
+    return;
+  }
+
+  // 以下为实例级操作（move/remove/replace/reparent）：需 3D 选中目标实例
+  const { nodeId, templateId } = state.targetInstance;
+  if (!nodeId || !templateId) {
+    setFormHint('请先在 3D 视口点选目标零件', 'error');
+    return;
+  }
+  // 结构操作 · 调整层级：把 3D 点选的零件移到指定父装配下
+  if (opKey === 'reparent') {
+    const parentEl = document.getElementById('sf-p-parent_id');
+    const parentId = parentEl?.value || null;
+    if (!parentId) { setFormHint('请选择新父节点', 'error'); return; }
+    upsertAssemblyStep(nodeId, templateId, 'reparent', { parent_id: parentId },
+      `${targetInstanceName()}: 调层级 移至「${parentId}」`);
+    return;
+  }
   if (opKey === 'move') {
     const params = { dx: readNum('dx'), dy: readNum('dy'), dz: readNum('dz') };
     upsertAssemblyStep(nodeId, templateId, 'move', params,
@@ -1060,7 +1249,17 @@ function addAssemblyStep(opKey) {
     `${targetInstanceName()}: 换件 ← 来源 ${srcKey.slice(0, 6)}/${srcTid}`);
 }
 
-/** 同实例装配步骤后写覆盖（replace/move 各一条）。 */
+/** 生成不与现有节点冲突的新分组 id（g1/g2…，防与装配节点 n\d+ 撞名）。 */
+let groupSeq = 0;
+function genGroupId() {
+  let g;
+  do { g = `g${++groupSeq}`; }
+  while (treeDraft.nodes.has(g) || treeBaseline.nodes.has(g)
+         || state.draftSteps.some((s) => s.node_id === g));
+  return g;
+}
+
+/** 同实例装配步骤后写覆盖（replace/move/reparent/group_dissolve 各一条）。 */
 function upsertAssemblyStep(nodeId, templateId, operation, params, title) {
   const i = state.draftSteps.findIndex(
     (s) => s.operation === operation && s.node_id === nodeId);
@@ -1376,8 +1575,10 @@ function setVerifyHint(text, level = 'info') {
 setVerifyHint('等待草稿步骤变更…（自动检查为 AABB 快速粗筛）');
 
 // 精确检查按钮：显式触发布尔精检（自动粗筛只做 AABB 提示）
-$('#verify-exact').addEventListener('click', () => runPreview('exact'));
-$('#verify-reset').addEventListener('click', () => resetVerify());
+// #verify-reset 由验证面板动态渲染（renderVerifyPane），此处仅静态校验
+// #verify-exact；用可选链避免静态顶栏无对应元素时初始化崩溃。
+$('#verify-exact')?.addEventListener('click', () => runPreview('exact'));
+$('#verify-reset')?.addEventListener('click', () => resetVerify());
 
 // ==========================================================================
 // M5：FEA 基线 vs 草稿双跑对比 + 差异摘要
@@ -1886,6 +2087,32 @@ function searchParts(q) {
   return out;
 }
 
+/**
+ * 把一组零件设为当前目标并在双视口高亮+取景，同步编辑区目标。
+ * 搜索命中与结构树点选共用此入口，保证两侧行为一致。
+ */
+function highlightAndFocus(ids, label) {
+  if (!ids || !ids.length) return;
+  // 先把视图焦点设到目标零件：让「子装配/零件」视图范围按它计算生效
+  state.focus = { level: 'part', nodeId: ids[0] };
+  updateRangeButtons();
+  reapplyViewFilter();          // 应用该焦点的范围可见性（同时清除旧高亮）
+  // 同步编辑区「目标」到该零件：让装配目标/零件编辑的模板/特征都跟随
+  const tId0 = sceneBaseline.templateOf(ids[0]);
+  state.targetInstance = { nodeId: ids[0], templateId: tId0 || null };
+  treeBaseline.select(ids[0]);
+  treeDraft.select(ids[0]);
+  if (tId0) setTargetTemplate(tId0);
+  refreshTargetRow();
+  renderParams();
+  sceneBaseline.highlight(new Set(ids));
+  sceneDraft.highlight(new Set(ids));
+  // 取景略远一点（留些余量），避免贴得太近
+  sceneBaseline.fitToIds(ids, 1.35);
+  if (!camSync) sceneDraft.fitToIds(ids, 1.35);
+  statusFn(label);
+}
+
 /** 渲染搜索结果：模板组 + 零件组；点击高亮并取景。 */
 function renderSearch(query) {
   const box = $('#step-search-results');
@@ -1895,27 +2122,6 @@ function renderSearch(query) {
   if (!q || !state.baselineLoaded) { box.hidden = true; return; }
   const tmpls = searchTemplates(q);
   const parts = searchParts(q);
-  const highlightAndFit = (ids, label) => {
-    if (!ids || !ids.length) return;
-    // 先把视图焦点设到目标零件：让「子装配/零件」视图范围按它计算生效
-    state.focus = { level: 'part', nodeId: ids[0] };
-    updateRangeButtons();
-    reapplyViewFilter();          // 应用该焦点的范围可见性（同时清除旧高亮）
-    // 同步编辑区「目标」到该零件：让装配目标/零件编辑的模板/特征都跟随搜索
-    const tId0 = sceneBaseline.templateOf(ids[0]);
-    state.targetInstance = { nodeId: ids[0], templateId: tId0 || null };
-    treeBaseline.select(ids[0]);
-    treeDraft.select(ids[0]);
-    if (tId0) setTargetTemplate(tId0);
-    refreshTargetRow();
-    renderParams();
-    sceneBaseline.highlight(new Set(ids));
-    sceneDraft.highlight(new Set(ids));
-    // 搜索取景略远一点（留些余量），避免贴得太近
-    sceneBaseline.fitToIds(ids, 1.35);
-    if (!camSync) sceneDraft.fitToIds(ids, 1.35);
-    statusFn(`搜索 → 高亮 ${label}`);
-  };
   const addHeader = (txt) => {
     const h = document.createElement('div'); h.className = 'src-hdr'; h.textContent = txt;
     box.appendChild(h);
@@ -1930,13 +2136,13 @@ function renderSearch(query) {
     tmpls.forEach((t) => {
       const ids = [...sceneBaseline.instances.keys()].filter(
         (id) => sceneBaseline.templateOf(id) === t.id);
-      addRow(`类 ${t.label}`, () => highlightAndFit(ids, t.label));
+      addRow(`类 ${t.label}`, () => highlightAndFocus(ids, `搜索 → 高亮 ${t.label}`));
     });
   }
   if (parts.length) {
     addHeader(`零件 ${parts.length}（可能包含子/合集匹配）`);
     parts.forEach((p) => {
-      addRow(`件 ${p.label}`, () => highlightAndFit([p.nodeId], p.label));
+      addRow(`件 ${p.label}`, () => highlightAndFocus([p.nodeId], `搜索 → 高亮 ${p.label}`));
     });
   }
   // 防止结果列表过多撑爆侧栏

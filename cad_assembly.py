@@ -1230,6 +1230,8 @@ def replay_draft_shapes(cache_dir: str, manifest: dict, store,
             continue   # 实例级位移：manifest 侧处理（moves_from_steps）
         if op.lower() == "remove":
             continue   # 实例级删除：manifest 侧剪枝（removed_ids_from_steps）
+        if op.lower() in ("reparent", "group_create", "group_dissolve"):
+            continue   # 结构操作：manifest 侧处理（structure_from_steps）
         if not tid:
             raise ValueError(f"step missing template_id: {s}")
 
@@ -1385,6 +1387,239 @@ def apply_removals(manifest: dict, removed_ids: set) -> dict:
     return out
 
 
+# --------------------------------------------------------------------------
+# 结构操作（改变子装配层级 · 实例级）
+# 与 move/remove 同类：用 node_id 寻址、改装配树结构、不动几何。
+# 关键点：树节点 matrix 是世界系累积矩阵，所以"换父/改组/解散组"只改
+# children 归属、保持世界位形 —— 几何零位移，不引入干涉变化，与
+# apply_moves（改世界位移）正交。
+# --------------------------------------------------------------------------
+
+def _collect_node_ids(node: dict) -> set:
+    """递归收集以 node 为根的整棵子树所有 id（含自身，用于"是否后代"判定）。"""
+    ids = {node["id"]}
+    for c in node.get("children", []):
+        ids |= _collect_node_ids(c)
+    return ids
+
+
+def structure_from_steps(steps: list) -> dict:
+    """把草稿步骤表规约为结构最终态 {reparents, groups, dissolves}。
+
+    顺序扫描、后写覆盖（与 geometric 步骤的"最终形状"、move 的"总位移"
+    语义一致）：同一 node 的 reparent 取最后一条；group_create 按 id 去重；
+    group_dissolve 去重集合。返回：
+        reparents: {node_id: parent_id}
+        groups:    [{id, name, parent_id}]
+        dissolves: set(node_id)
+    """
+    reparents: dict = {}
+    groups: list = []
+    groups_by_id: dict = {}
+    dissolves: set = set()
+    for s in steps:
+        op = (s.get("operation") or "").lower()
+        params = s.get("params") or {}
+        nid = s.get("node_id")
+        if op == "reparent":
+            if not nid:
+                raise ValueError(f"reparent step missing node_id: {s}")
+            pid = params.get("parent_id")
+            if not pid:
+                raise ValueError(f"reparent step missing params.parent_id: {s}")
+            reparents[nid] = pid
+        elif op == "group_create":
+            if not nid:
+                raise ValueError(f"group_create step missing node_id: {s}")
+            if nid in groups_by_id:
+                raise ValueError(f"重复的新分组 id: {nid}")
+            groups_by_id[nid] = nid
+            groups.append({
+                "id": nid,
+                "name": str(params.get("name") or nid),
+                "parent_id": params.get("parent_id"),
+            })
+        elif op == "group_dissolve":
+            if not nid:
+                raise ValueError(f"group_dissolve step missing node_id: {s}")
+            dissolves.add(nid)
+    return {"reparents": reparents, "groups": groups, "dissolves": dissolves}
+
+
+def apply_structure(manifest: dict, structure: dict) -> dict:
+    """Deep-copy manifest，应用结构最终态：先建组 → 再 reparent → 最后解散。
+
+    只改 children 归属与节点 type/name，绝不动任何 matrix（世界位形不变）。
+    严格校验，非法/未知 node 直接 ValueError（与 apply_moves/apply_removals
+    惯例一致）：
+      * reparent：node 非 root、parent 存在且为 assembly、parent 不是
+        自身或自身后代、parent 未被本草稿解散；
+      * group_create：id 不与现树冲突、parent（若有）为 assembly 且未解散；
+      * group_dissolve：目标是 assembly、非 root、是草稿内新建组或现树节点。
+    """
+    import copy
+    out = copy.deepcopy(manifest)
+    s = structure or {}
+    reparents: dict = s.get("reparents") or {}
+    groups: list = s.get("groups") or []
+    dissolves: set = set(s.get("dissolves") or [])
+
+    root = out["root"]
+    if root is None:
+        raise ValueError("结构操作：装配树已为空（root 缺失）")
+
+    # ---- 预收集：现树所有节点 id + 各自的父亲索引（id -> node） ----
+    id_to_node: dict = {}
+    parent_of: dict = {}          # child_id -> parent node
+    def index(node, parent=None):
+        id_to_node[node["id"]] = node
+        if parent is not None:
+            parent_of[node["id"]] = parent
+        for c in node.get("children", []):
+            index(c, node)
+    index(root)
+
+    existing_ids = set(id_to_node)
+
+    # ---- 先校验草稿新建分组（id 唯一性 + 父节点合法） ----
+    draft_groups = {}
+    draft_group_parent: dict = {}
+    for g in groups:
+        gid = g["id"]
+        if gid in existing_ids or gid in draft_groups:
+            raise ValueError(f"新建分组 id 冲突: {gid}")
+        pid = g.get("parent_id")
+        if pid is not None:
+            if pid not in id_to_node and pid not in draft_groups:
+                raise ValueError(f"group_create 父节点不存在: {pid}")
+            if pid not in draft_groups and id_to_node[pid].get("type") != "assembly":
+                raise ValueError(f"group_create 父节点不是装配节点: {pid}")
+            if pid == gid:
+                raise ValueError(f"group_create 不能作为自己的父节点: {gid}")
+            if pid in dissolves:
+                raise ValueError(f"group_create 父节点已被解散: {pid}")
+        # 即使 group_create 后又 dissolve，也先物化由解散步骤移除，
+        # 保证"建→解散"自抵消不报错（见 group_dissolve 处理）。
+        draft_groups[gid] = {
+            "id": gid,
+            "name": g.get("name", gid),
+            "type": "assembly",
+            "matrix": None,
+            "children": [],
+            "synthetic": True,
+        }
+        draft_group_parent[gid] = pid
+
+    # ---- 预校验 reparent ----
+    final_parent: dict = {}       # child_id -> parent_id（仅被 reparent 的节点）
+    for nid, pid in reparents.items():
+        if nid == root["id"]:
+            raise ValueError(f"不能 reparent 根节点: {nid}")
+        if nid not in id_to_node:
+            raise ValueError(
+                f"reparent 引用不存在的 node_id: {nid} "
+                f"（node_id 是装配树节点 id 如 'n2'）")
+        if nid in dissolves:
+            raise ValueError(f"不能 reparent 一个被解散的节点: {nid}")
+        parent_node = draft_groups.get(pid) or id_to_node.get(pid)
+        if parent_node is None:
+            raise ValueError(f"reparent 父节点不存在: {pid}")
+        if parent_node.get("type") != "assembly":
+            raise ValueError(f"reparent 父节点不是装配节点: {pid}")
+        # 允许 reparent 到"本草稿将解散"的组/装配：应用顺序先建组→reparent→
+        # dissolve，节点先挂进去、再随解散上提到其父（"临时分组最后解散"）。
+        final_parent[nid] = pid
+
+    # 环检测：仅在被 reparent 节点集合内沿 final_parent 行进，回到自身即环。
+    # （互不相干的节点可互挂，如 A->B 且 B->A，会形成环导致递归无限渲染，
+    #   必须拒绝。祖先/后代互挂已在下面"不能移到自身现树后代"拦截。）
+    in_reparent = set(final_parent)
+    for nid in list(final_parent):
+        seen = set()
+        cur = nid
+        while cur in in_reparent:
+            if cur in seen:
+                raise ValueError(
+                    "reparent 形成环，非法结构: "
+                    + " -> ".join(list(seen) + [cur]))
+            seen.add(cur)
+            cur = final_parent[cur]
+
+    # "不能移到自身现树后代"（拖拽父选择器已在 UI 排除，但后端兜底）
+    for nid in reparents:
+        subtree = _collect_node_ids(id_to_node[nid])
+        bad = [pid for pid in (reparents[nid],) if pid in subtree]
+        if bad:
+            raise ValueError(
+                f"reparent 不能将节点移到自身后代下: {nid} -> {bad[0]}")
+
+    # ---- 正式应用：0) 挂载分组 · 1) reparent(摘/挂) · 2) 解散 ----
+    def detach(node, from_parent):
+        kids = from_parent.setdefault("children", [])
+        for i, c in enumerate(kids):
+            if c.get("id") == node["id"]:
+                kids.pop(i)
+                return
+        # 不在该父下（已是别处挂载）——忽略
+
+    # 0) 把草稿新建分组挂到其父（现树装配 / 另一草稿组；无父则挂根）。
+    #    即便 group_create 后又 dissolve，也先挂载再让解散步骤移除，
+    #    从而"建→解散"自抵消、简化解散定位。
+    for gid in draft_groups:
+        gnode = draft_groups[gid]
+        pid = draft_group_parent.get(gid)
+        if pid is None:
+            parent_obj = root
+        else:
+            parent_obj = draft_groups.get(pid) or id_to_node.get(pid) or root
+        parent_obj.setdefault("children", []).append(gnode)
+
+    # 摘：把所有被 reparent 的源从其现树父下摘出（支持链式 A->B->C）
+    for nid in reparents:
+        p = parent_of.get(nid)
+        if p is not None:
+            detach(id_to_node[nid], p)
+    # 挂：按 reparent 输入顺序挂到目标父（草稿组或现树装配节点）
+    for nid, pid in reparents.items():
+        parent_obj = draft_groups.get(pid) or id_to_node[pid]
+        parent_obj.setdefault("children", []).append(id_to_node[nid])
+
+    # 3) 解散 group_dissolve：仅允许解散 assembly（非 root）节点，
+    #    子节点上提到父节点下，然后移除该节点。
+    for did in dissolves:
+        if did == root["id"]:
+            raise ValueError(f"不能解散根节点: {did}")
+        node_obj = id_to_node.get(did) or draft_groups.get(did)
+        if node_obj is None:
+            raise ValueError(f"group_dissolve 引用不存在的节点: {did}")
+        if node_obj.get("type") != "assembly":
+            raise ValueError(f"只能解散装配节点，不能解散零件: {did}")
+        parent_obj = _locate_actual_parent(out["root"], did)
+        if parent_obj is None:
+            raise ValueError(f"group_dissolve 无法定位节点 {did} 的挂靠父")
+        idx_children = parent_obj.setdefault("children", [])
+        kept = [c for c in idx_children if c.get("id") != did]
+        idx_children[:] = kept
+        # 把被解散节点的 children 上提到父下（保持顺序）
+        idx_children.extend(node_obj.get("children", []))
+        node_obj["children"] = []
+
+    return out
+
+
+def _locate_actual_parent(root: dict, node_id):
+    """树根到被摘节点的实际父（扫描 children 引用）。与 _find_tree_parent
+    等价，但更宽容，供被 reparent 进草稿组后的子节点查找。"""
+    stack = [(root, None)]
+    while stack:
+        node, par = stack.pop()
+        for c in node.get("children", []):
+            if c.get("id") == node_id:
+                return node
+            stack.append((c, node))
+    return None
+
+
 def draft_step_title(step: dict, manifest: dict) -> str:
     """Deterministic human-readable title for a draft step (used by the
     frontend and the eventual batch changelog)."""
@@ -1401,6 +1636,23 @@ def draft_step_title(step: dict, manifest: dict) -> str:
         node = _find_node(manifest, nid)
         name = node.get("name", nid) if node else nid
         return f"{name}: 删除"
+    if op.lower() == "reparent":
+        nid = step.get("node_id", "?")
+        pid = params.get("parent_id", "?")
+        node = _find_node(manifest, nid)
+        name = node.get("name", nid) if node else nid
+        parent = _find_node(manifest, pid) if pid != nid else None
+        pname = parent.get("name", pid) if parent else (pid
+                                                        if pid.startswith("g") else pid)
+        return f"{name}: 层级 移至「{pname}」"
+    if op.lower() == "group_create":
+        nid = step.get("node_id", "?")
+        return f"新建分组「{params.get('name') or nid}」"
+    if op.lower() == "group_dissolve":
+        nid = step.get("node_id", "?")
+        node = _find_node(manifest, nid)
+        name = node.get("name", nid) if node else nid
+        return f"解散分组「{name}」"
     tid = step.get("template_id", "?")
     tpl = next((t for t in manifest.get("templates", []) if t["id"] == tid), None)
     tpl_name = tpl.get("name", tid) if tpl else tid

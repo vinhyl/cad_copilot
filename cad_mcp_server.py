@@ -533,6 +533,13 @@ def preview_draft(cache_key: str, steps: str) -> str:
                params.align = origin|base|top|center|seat or a per-axis dict
                like {"z": "min"} (default base). Replaces all instances in
                place -- the draft preview + interference gate validate it.
+               Instance-level (node_id addressing, no template_id):
+               "move" uses params.dx/dy/dz; "remove"; and structure ops that
+               change sub-assembly hierarchy WITHOUT moving geometry --
+               "reparent" params.parent_id (new parent assembly node id, keep
+               world pose), "group_create" params.name + parent_id (node_id is
+               a client-generated id like "g1", must not collide), and
+               "group_dissolve" (hoists the node's children up one level).
     Returns: JSON {interferences, edited_templates, diff} (the full draft
     manifest is trimmed away -- call read_draft/pick_features for details).
     """

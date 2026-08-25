@@ -4,14 +4,21 @@
  *   - 复位分层预留：显隐复选框按节点层级生效（父级隐藏连带后代）
  */
 export class AssemblyTree {
-  constructor(container, { onSelect, onToggle }) {
+  constructor(container, { onSelect, onToggle, dnd, toolbar } = {}) {
     this.container = container;
     this.onSelect = onSelect;   // (nodeId) => void
     this.onToggle = onToggle;   // (visibleByPartId: Map) => void
+    // dnd：{ onDrop(nodeId, parentId) } —— 拖拽改变层级（仅草稿树传）。
+    // toolbar：{ onGroupCreate(parentId), onGroupDissolve(nodeId) } ——
+    // 分组工具条（新建空分组 / 解散分组），缺省则不渲染、保持只读。
+    this.dnd = dnd || null;
+    this.toolbar = toolbar || null;
     this.nodes = new Map();     // id -> { node, parentId }
     this.visible = new Map();   // id -> bool（节点自身复选框状态）
     this.rows = new Map();      // id -> row element
     this.selectedId = null;
+    this._rootId = null;
+    this._dragId = null;
   }
 
   render(root) {
@@ -20,7 +27,58 @@ export class AssemblyTree {
     this.visible.clear();
     this.rows.clear();
     this.selectedId = null;
+    this._rootId = root.id;
+    if (this.toolbar) this._buildToolbar();
     this.container.appendChild(this._build(root, null));
+    // 事件委托统一处理拖拽（草稿树且启用了 dnd）
+    if (this.dnd) this._wireDragHandlers();
+    this._updateGroupControls();
+  }
+
+  /**
+   * 分组工具条：作用于当前选中节点。
+   *  - 「＋新建分组」：选中为装配节点时，在其下新建一个空分组
+   *  - 「解散分组」：选中为装配节点且非 root 时，解散（子节点上提一级）
+   */
+  _buildToolbar() {
+    const bar = document.createElement('div');
+    bar.className = 'tree-toolbar';
+    const mk = (id, text, title) => {
+      const b = document.createElement('button');
+      b.id = id; b.textContent = text; b.title = title; b.type = 'button';
+      return b;
+    };
+    this._btnGroup = mk('tt-btn-group', '＋ 新建分组', '在选中装配节点下新建空分组');
+    this._btnDissolve = mk('tt-btn-dissolve', '解散分组', '解散选中分组（子节点上提一级）');
+    bar.append(this._btnGroup, this._btnDissolve);
+    this.container.appendChild(bar);
+    this._btnGroup.addEventListener('click', () => {
+      if (this._canGroup()) this.toolbar.onGroupCreate(this.selectedId);
+      else this._flashHint('新建分组需选中一个装配节点');
+    });
+    this._btnDissolve.addEventListener('click', () => {
+      if (this._canDissolve()) this.toolbar.onGroupDissolve(this.selectedId);
+      else this._flashHint('解散分组需选中一个非根的装配节点');
+    });
+  }
+
+  _flashHint() { /* 占位：禁用态已在按钮上提示，无需额外动作 */ }
+
+  _canGroup() {
+    const rec = this.selectedId ? this.nodes.get(this.selectedId) : null;
+    return !!rec && rec.node.type === 'assembly';
+  }
+  _canDissolve() {
+    const rec = this.selectedId ? this.nodes.get(this.selectedId) : null;
+    return !!rec && rec.node.type === 'assembly' && this.selectedId !== this._rootId;
+  }
+  _updateGroupControls() {
+    if (!this.toolbar) return;
+    for (const [btn, can] of [[this._btnGroup, this._canGroup()],
+                              [this._btnDissolve, this._canDissolve()]]) {
+      btn.disabled = !can;
+      btn.classList.toggle('hint-disabled', !can);
+    }
   }
 
   /** 树上选中某节点（外部 3D 点选回调进来时同步）。 */
@@ -40,6 +98,86 @@ export class AssemblyTree {
         else if (rRect.bottom > cRect.bottom) this.container.scrollTop += rRect.bottom - cRect.bottom;
       }
     }
+    this._updateGroupControls();
+  }
+
+  /** idA 是否是 idB 的祖先（沿 parent 链）。 */
+  _isAncestor(idA, idB) {
+    let cur = idB;
+    while (cur) {
+      if (cur === idA) return true;
+      cur = this.nodes.get(cur)?.parentId ?? null;
+    }
+    return false;
+  }
+
+  /** 一次给多个节点设置 class（仅在目标行存在时）。 */
+  _setDropClass(nodeId, className, on) {
+    const row = this.rows.get(nodeId);
+    if (row) row.classList.toggle(className, on);
+  }
+
+  _isLegalDropTarget(targetId) {
+    if (!this._dragId || targetId === this._dragId) return false;
+    const rec = this.nodes.get(targetId);
+    if (!rec || rec.node.type !== 'assembly') return false;   // 只能放装配节点
+    if (this._isAncestor(this._dragId, targetId)) return false;  // 不能放自身/后代
+    return true;
+  }
+
+  _wireDragHandlers() {
+    // 只绑定一次：拖拽用事件委托 + 行 dataset.nodeId，多 render 复用即可。
+    if (this._dndBound) return;
+    this._dndBound = true;
+    this.container.addEventListener('dragstart', (e) => {
+      const row = e.target.closest('.trow');
+      if (!row) return;
+      const id = row.dataset.nodeId;
+      if (!id) return;
+      this._dragId = id;
+      row.classList.add('dragging');
+      e.dataTransfer.effectAllowed = 'move';
+      // Firefox 需要设置数据才能触发 dragover
+      try { e.dataTransfer.setData('text/plain', id); } catch (_) {}
+    });
+    this.container.addEventListener('dragover', (e) => {
+      const row = e.target.closest('.trow');
+      if (!row || !this._dragId) return;
+      const id = row.dataset.nodeId;
+      if (this._isLegalDropTarget(id)) {
+        e.preventDefault();
+        e.dataTransfer.dropEffect = 'move';
+        this._setDropClass(this._lastDropId, 'drop-target', false);
+        this._setDropClass(id, 'drop-target', true);
+        this._lastDropId = id;
+      } else {
+        this._setDropClass(id, 'drop-invalid', true);
+        this._setDropClass(this._lastDropId, 'drop-target', false);
+      }
+    });
+    this.container.addEventListener('dragleave', (e) => {
+      const row = e.target.closest('.trow');
+      if (row) { this._setDropClass(row.dataset.nodeId, 'drop-target', false);
+                 this._setDropClass(row.dataset.nodeId, 'drop-invalid', false); }
+    });
+    this.container.addEventListener('drop', (e) => {
+      const row = e.target.closest('.trow');
+      if (!row || !this._dragId) return;
+      const targetId = row.dataset.nodeId;
+      if (this._isLegalDropTarget(targetId)) {
+        e.preventDefault();
+        this.dnd.onDrop(this._dragId, targetId);
+      }
+    });
+    this.container.addEventListener('dragend', () => {
+      if (this._dragId) this._setDropClass(this._dragId, 'dragging', false);
+      for (const id of this.rows.keys()) {
+        this._setDropClass(id, 'drop-target', false);
+        this._setDropClass(id, 'drop-invalid', false);
+      }
+      this._dragId = null;
+      this._lastDropId = null;
+    });
   }
 
   /** 某节点下所有 part 实例的 id 集合（高亮作用域）。 */
@@ -83,6 +221,8 @@ export class AssemblyTree {
 
     const row = document.createElement('div');
     row.className = 'trow';
+    row.dataset.nodeId = node.id;
+    if (this.dnd) row.draggable = true;   // 仅草稿树可拖拽调层级
     this.rows.set(node.id, row);
 
     const cb = document.createElement('input');

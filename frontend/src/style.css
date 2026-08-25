@@ -1283,7 +1283,33 @@ html, body {
   .entry-cards { width: 300px; }
 }
 
-.mini-tree { display: none; }
+/* ---------- 结构树浮层（编辑页视口内，基线与草稿两视口各一棵） ---------- */
+.mini-tree {
+  position: absolute; top: 40px; left: 8px; z-index: 5;
+  width: 250px; max-width: 70%; max-height: 62%; overflow: auto;
+  background: rgba(24, 24, 29, 0.92); border: 1px solid #3a3a44;
+  border-radius: 6px; padding: 6px; font-size: 12px;
+  display: none;
+}
+.mini-tree.show { display: block; }
+/* 树面板头：新建分组 / 解散分组 工具条 */
+.mini-tree .tree-toolbar {
+  display: flex; gap: 6px; margin-bottom: 6px;
+  padding-bottom: 6px; border-bottom: 1px solid #33333c;
+}
+.mini-tree .tree-toolbar button {
+  flex: 1; border: 1px solid #3a3a44; border-radius: 5px;
+  background: #1e1e23; color: #a0a0aa; padding: 3px 6px;
+  font-size: 11px; cursor: pointer; white-space: nowrap;
+}
+.mini-tree .tree-toolbar button:hover { background: #32323c; }
+.mini-tree .tree-toolbar button.hint-disabled {
+  opacity: 0.45; cursor: not-allowed;
+}
+/* 拖拽反馈 */
+.trow.dragging { opacity: 0.4; }
+.trow.drop-target { outline: 1px solid #4b3fe3; outline-offset: -1px; background: rgba(75, 63, 227, 0.25); }
+.trow.drop-invalid { outline: 1px dashed #e3544b; }
 
 /* ---------- 图纸对照独立页 ---------- */
 .page-drawing {

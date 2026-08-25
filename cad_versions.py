@@ -136,7 +136,8 @@ class VersionStore:
     def commit(self, changes: dict, changelog: str,
                prepared_dir: str | None = None,
                moves: dict | None = None,
-               removed_ids: list | set | None = None) -> dict:
+               removed_ids: list | set | None = None,
+               structure: dict | None = None) -> dict:
         """Atomically commit a new version.
 
         Args:
@@ -150,10 +151,14 @@ class VersionStore:
                 语义为"该节点相对基线的总位移"，跨版本后写覆盖。
             removed_ids: 实例级删除 {node_id}（草稿 remove 步骤落版本）。
                 与 moves 一样，允许 removal-only 提交（changes 为空）。
+            structure: 结构重组 {reparents, groups, dissolves}（草稿
+                reparent/group_create/group_dissolve 步骤落版本）。允许
+                structure-only 提交（changes 为空）。重父/改组只改 children
+                归属、不动几何，跨版本按 resolve_structure 合并。
 
         Returns the new version record.
         """
-        if not changes and not moves and not removed_ids:
+        if not changes and not moves and not removed_ids and not structure:
             raise ValueError("empty changes")
         vid = self.next_version_id()
         target = os.path.join(self.root, vid)
@@ -195,10 +200,41 @@ class VersionStore:
                                for nid, d in moves.items()}
         if removed_ids:
             record["removed"] = sorted(removed_ids)
+        if structure:
+            record["structure"] = structure
         self._manifest["versions"].append(record)
         self._manifest["current"] = vid
         self._save_manifest()
         return record
+
+    def resolve_structure(self, version: str | None = None) -> dict:
+        """{reparents, groups, dissolves} —— 版本链上 ≤ version 的全部结构
+        重组记录，跨版本合并：
+          * reparents 后写覆盖（与 resolve_moves 一致）—— 同 node 最新父为胜；
+          * groups/dissolves 取并集（与 resolve_removed 一致）—— 建组/解散
+            都是单调事件，回滚靠 checkout 截断到旧版本去掉后续记录。
+
+        旧版本（无 structure 字段）返回空结构，行为与未实现本特性时一致。"""
+        vid = version or self.current
+        order = self._version_order()
+        if vid not in order:
+            raise KeyError(f"no such version: {vid}")
+        reparents: dict = {}
+        groups: list = []
+        groups_by_id: set = set()
+        dissolves: set = set()
+        for v in self._manifest["versions"]:
+            if order[v["id"]] > order[vid]:
+                continue
+            s = v.get("structure") or {}
+            reparents.update(s.get("reparents") or {})
+            for g in s.get("groups") or []:
+                if g.get("id") in groups_by_id:
+                    continue
+                groups_by_id.add(g.get("id"))
+                groups.append(g)
+            dissolves.update(s.get("dissolves") or [])
+        return {"reparents": reparents, "groups": groups, "dissolves": dissolves}
 
     def resolve_removed(self, version: str | None = None) -> set:
         """{node_id} —— 版本链上 ≤ version 的全部 remove（删除）记录。

@@ -524,6 +524,9 @@ def create_app(token: str | None = None,
         moves = store.resolve_moves()
         if moves:
             manifest = cad_assembly.apply_moves(manifest, moves)
+        structure = store.resolve_structure()
+        if structure:
+            manifest = cad_assembly.apply_structure(manifest, structure)
         removed = store.resolve_removed()
         if removed:
             manifest = cad_assembly.apply_removals(manifest, removed)
@@ -782,7 +785,8 @@ def create_app(token: str | None = None,
                     {"error": f"step #{i} missing operation"},
                     status_code=400)
             op = str(s.get("operation")).lower()
-            if op not in ("move", "remove") and not s.get("template_id"):
+            if op not in ("move", "remove", "reparent", "group_create",
+                          "group_dissolve") and not s.get("template_id"):
                 return JSONResponse(
                     {"error": f"step #{i} missing template_id/operation"},
                     status_code=400)
@@ -891,9 +895,16 @@ def create_app(token: str | None = None,
                     moves = cad_assembly.moves_from_steps(steps)
                     gate_manifest = (cad_assembly.apply_moves(manifest, moves)
                                      if moves else manifest)
-                    # 1b) M 删除步骤：从 gate_manifest 剪枝对应实例
-                    # （不参与干涉/渲染）。先 move 后 remove：同一节点
-                    # 既被移又被删时，以删为准。
+                    # 1b) 结构重组步骤（reparent / group_create /
+                    #     group_dissolve）：改变子装配层级，保世界位形。
+                    #     插在 move 后、remove 前：先移位置再改归属，
+                    #     同一节点既被结构移动又被 remove 时，以删为准。
+                    structure = cad_assembly.structure_from_steps(steps)
+                    if structure and any(structure.values()):
+                        gate_manifest = cad_assembly.apply_structure(
+                            gate_manifest, structure)
+                    # 1c) M 删除步骤：从 gate_manifest 剪枝对应实例
+                    # （不参与干涉/渲染）。最后执行：结构+位移都落定后剪枝。
                     removed_ids = cad_assembly.removed_ids_from_steps(steps)
                     if removed_ids:
                         gate_manifest = cad_assembly.apply_removals(
@@ -1010,6 +1021,11 @@ def create_app(token: str | None = None,
                     moves = cad_assembly.moves_from_steps(steps)
                     gate_manifest = (cad_assembly.apply_moves(manifest, moves)
                                      if moves else manifest)
+                    # 1b2) 结构重组步骤（reparent/group_create/group_dissolve）
+                    structure = cad_assembly.structure_from_steps(steps)
+                    if structure and any(structure.values()):
+                        gate_manifest = cad_assembly.apply_structure(
+                            gate_manifest, structure)
                     removed_ids = cad_assembly.removed_ids_from_steps(steps)
                     if removed_ids:
                         gate_manifest = cad_assembly.apply_removals(
@@ -1041,7 +1057,9 @@ def create_app(token: str | None = None,
                         changes, changelog=changelog, prepared_dir=tmp_dir,
                         moves={nid: {"dx": d[0], "dy": d[1], "dz": d[2]}
                                for nid, d in moves.items()},
-                        removed_ids=sorted(removed_ids))
+                        removed_ids=sorted(removed_ids),
+                        structure=structure if (structure and
+                                                any(structure.values())) else None)
                     # 4) 刷新被编辑模板的特征缓存（保留稳定 id）
                     for tid, shp in edited_shapes.items():
                         try:
