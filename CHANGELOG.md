@@ -63,6 +63,11 @@
   撑大；`.rail-body` 自带 `overflow:auto` 在锁高后生效，超出部分在侧栏内滚动，
   中间的模型视口始终保持在首屏高度内，不再被推向屏外。
 
+### 修复 (Fixed)（编辑页特征列表空 + 点选零件不回填目标）
+- **症状**：进入编辑页做零件编辑时，目标「特征」下拉列表始终为空（非"该模板没有可编辑特征"提示，纯空白）；在 3D 模型上点击零件无法把编辑区目标跳到对应模板/特征。结构树（b99f0dc）上线、零件编辑更易用后才被注意到。
+- **根因**：来自更早提交 `2cd9d733`（引入整套 feature-target 系统），结构树只是**暴露**而非引入——`initStepForm` 预选 `templates[0]` 为目标后只调 `renderOperations()`，**漏了 `renderFeatureOptions()`**；叠加 `setTargetTemplate` 的早退守卫（`if (!tid || tid === state.targetTemplateId) return;`），点击已默认选中的模板零件时 `setTargetTemplate(t0)` 直接返回 → 特征列表**永不填充**。单零件装配（仅 t0）每次点选都命中早退，故既"列表空"又"点选无效"；数据层 features 经实测正常，排除数据缺失。
+- **修复**：`initStepForm` 末尾改为按 `currentGranularity()` 判定——feature 域（零件编辑）直接 `renderFeatureOptions()` 填充特征列表，assembly 域仍 `renderOperations()`。`renderFeatureOptions` 末自带 `renderOperations()`，不重复调用。提交 `cdda27f`（dist 随 src 重建并对齐，pre-commit dist-sync 校验 `frontend/dist matches frontend/src (OK)`）。
+
 ### 变更 (Changed)（编辑会话验证轨道：干涉高亮 + 精检结果跨刷新保留 + 手动重置）
 - **点击干涉结果高亮对应零件**：`renderVerify` 的每条干涉卡片（精检/粗筛/窄屏
   抽屉）均可点击，`focusInterference` 在双视口用 `AssemblyScene.highlightPair`
