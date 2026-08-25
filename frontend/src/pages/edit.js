@@ -1008,7 +1008,11 @@ function initStepForm() {
     : state.baseline.manifest.templates[0]?.id || null;
   state.targetTemplateId = initial;
   if (initial) tplSel.value = initial;
-  renderOperations();
+  // 特征级（零件编辑）预选模板后应同步填充特征列表；否则仅重渲染操作域。
+  // 否则 setTargetTemplate 的同模板早退守卫会让「已默认选中模板」的特征列表永空、
+  // 且点选该模板零件无法触发回填（见 #12）。
+  if (currentGranularity() === 'feature') renderFeatureOptions();
+  else renderOperations();
 }
 
 $('#sf-template').addEventListener('change', (e) => setTargetTemplate(e.target.value));
