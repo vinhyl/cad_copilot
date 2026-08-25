@@ -31,8 +31,6 @@ jobs:
       # retired — it is now covered by the pytest suite (tests/test_selftest_e2e.py,
       # run in the step below), which is the authoritative regression gate.
       - name: Smoke test pick_features MCP tool (structured)
-
-      - name: Smoke test pick_features MCP tool (structured)
         run: |
           if [ "$RUNNER_OS" = "Windows" ]; then PY="venv/Scripts/python"; else PY="venv/bin/python"; fi
           "$PY" -c "import cad_mcp_server, json; d=json.loads(cad_mcp_server.pick_features('selftest.step')); assert d['feature_count']>0 and all('id' in f for f in d['features']), 'pick_features failed'; print('pick_features OK ->', d['feature_count'], 'features')"
