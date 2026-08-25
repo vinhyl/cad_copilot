@@ -175,7 +175,10 @@ def test_check_interference_detects_overlap():
         assert abs(hits[0]["volume_mm3"] - 500.0) < 1.0   # 10x10x5
     finally:
         if os.path.exists(path):
-            os.remove(path)
+            try:
+                os.remove(path)
+            except OSError:
+                pass
 
 
 def test_check_interference_clean_assembly(assembly_step):
@@ -256,27 +259,42 @@ def test_edit_drill_commits_v1(client):
     assert t1["gltf"] == "gltf_library/t1.gltf"
 
 
-def test_edit_interference_rejected_no_commit(client):
+def test_edit_interference_commits_but_preview_flags_it(client):
+    """Warn-only design (fb0d0b0): an edit that causes interference is NOT
+    blocked at commit -- it commits v1 and the caller surfaces interference
+    via the draft-preview endpoint instead. Two guards:
+      1) the edit still COMMITS (warn-only does not block the save);
+      2) interference is still DETECTED for the same edit via
+         /api/drafts/preview (detection moved out of the edit commit gate)."""
     body = _parse(client)
     key = body["cache_key"]
 
     # scale BasePlate x2.5 -> plate spans x[0,50] z[0,12.5], overlapping
-    # BOTH bolt instances (x[33,37] and x[43,47], z[5,13])
+    # BOTH bolt instances (x[33,37] and x[43,47], z[5,13]). The edit must
+    # still commit (warn-only, does not block the save).
     r = client.post("/api/assembly/edit", headers=_hdr(), json={
         "cache_key": key, "template_id": "t0", "operation": "scale",
         "params": {"factor": 2.5}})
-    assert r.status_code == 409, r.text
+    assert r.status_code == 200, r.text
     res = r.json()
-    assert res["ok"] is False and res["error"] == "interference"
-    assert res["stage"] == "interference_gate"
-    assert len(res["interferences"]) == 2
-    assert {hit["b"]["name"] for hit in res["interferences"]} == {"M4x8_Bolt"}
-    assert all(hit["volume_mm3"] > 0 for hit in res["interferences"])
+    assert res["ok"] is True and res["version"] == "v1"
 
-    # nothing committed: versions list still empty, current stays v0
+    # the edit was committed (warn-only does NOT block the save)
     r2 = client.get(f"/api/versions?cache_key={key}", headers=_hdr())
     lst = r2.json()
-    assert lst["versions"] == [] and lst["current"] == "v0"
+    assert [v["id"] for v in lst["versions"]] == ["v1"] and lst["current"] == "v1"
+
+    # interference is still detected for this edit via draft preview (the
+    # warn-only detection surface): replay the same scale and expect a hit
+    # between BasePlate and the M4x8_Bolt instances.
+    r3 = client.post("/api/drafts/preview", headers=_hdr(), json={
+        "cache_key": key,
+        "steps": [{"template_id": "t0", "operation": "scale",
+                   "params": {"factor": 2.5}}]})
+    assert r3.status_code == 200, r3.text
+    rep = r3.json()
+    assert rep["interference_count"] >= 1
+    assert any(h["b"]["name"] == "M4x8_Bolt" for h in rep["interferences"])
 
 
 def test_edit_rejects_bad_params_and_unknown_ids(client):
