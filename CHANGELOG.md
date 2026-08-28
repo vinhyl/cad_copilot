@@ -5,6 +5,42 @@
 
 ## [未发布]
 
+### 变更 (Changed)（启动服务默认落地首页，load / cacheKey 改为「打开具体文件」用法）
+- **默认落地页改为首页**：`cad_service_ctl.sh open` 打开的 URL 由 `drawing.html` 改为
+  `index.html`（首页：文件列表 / 装配预览入口），符合"启动服务 = 进首页"的直觉，
+  不再一上来就落到图纸对照页。
+- **文档语义纠正**：AGENTS.md「固定地址」段重写——首页为默认落地页；`&load=` /
+  `?cacheKey=` 明确为**「启动并打开某个具体文件」时才用**的追加参数，不是默认用法；
+  同时补齐编辑会话 / 报告中心两个二级视图的固定地址。
+
+### 变更 (Changed)（结构树点选零件高亮并同步编辑区目标）
+- **结构树 → 3D → 编辑区联动**：点击装配树节点即高亮对应零件并同步取景，同时把
+  编辑区的目标模板 / 目标特征切到该零件，避免"树上看中了还得去 3D 里再点一次"。
+  涉及 `cad_assembly.py`（装配树数据侧）、`frontend/src/pages/edit.js` 与 `style.css`。
+
+### 变更 (Changed)（frontend/dist 与 src 同步校验：脚本 + hook + CI job）
+- **一致性校验脚本** `scripts/check-dist-sync.sh`：`npm ci` + `npm run build` 后比对
+  `frontend/dist` 与 HEAD；默认模式（pre-commit）自动重建并暂存、仅警告不阻断，
+  `--strict` / CI 模式直接失败。
+- **本机 hook** `.githooks/pre-commit`（`git config core.hooksPath .githooks` 启用）：
+  frontend 源码变动时自动拦截"未重建的 dist"。
+- **CI `frontend-dist` job** 对每次 push / PR 跑 `--strict`，dist 不同步直接红。
+- 配套修复：`ci.yml` 重复 `name` 导致 workflow invalid、缺失前端入口 html 造成的
+  dist 跨平台不一致；并更新了一组与新的「干涉仅提醒（warn-only）」设计冲突的失效测试。
+- 根因背景：曾提交过与 src 对不上的 dist（dist 重做 DOM、src 仍按旧 id 找元素），
+  导致编辑页功能静默失效（历史反面案例，提交 1820116）。
+
+### 变更 (Changed)（双 token 入口：guest 默认 / dev 显式）
+- **方案 B**：服务同时认两个 token，并**按请求携带的 token 判定入口 mode**
+  （`GET /api/config` 返回 `"mode":"guest"|"dev"`）：
+  - `cad-guest-2026`（**默认**）：普通用户操作通道，打开页面 / 自调 API / MCP 调用默认用它；
+  - `cad-local-dev-2026`（开发通道）：仅当明确是开发诉求时才切到它；
+  - 可用 `CAD_SERVICE_GUEST_TOKEN` / `CAD_SERVICE_TOKEN` 覆盖。
+- **token 是入口身份的硬标记，优先于用户措辞**：guest 入口下即使用户说"提交""改代码"，
+  agent 也按普通用户口径兜底，不擅自切 dev。
+- 涉及 `cad_service.py`（双 token 校验 + mode 判定）、`cad_service_ctl.sh`
+  （探活与默认 URL 改用 guest）、`AGENTS.md`（使用者分类 + 按 token 判 mode）。
+
 ### 变更 (Changed)（装配操作新增「删除」+ 干涉改为仅提醒）
 - **新增装配操作 `remove`（删除零件，实例级）**：3D 点选目标 →「删除零件」→ 添加步骤；草稿重放时从装配树**剪枝该实例及其整棵子树**，草稿视口即时消失、不参与干涉。模板列表不动——同一模板若被其它实例共享则只删这一件。
 - **删除落版本持久化**：`draft_confirm` 把 `removed_ids` 存入版本记录（`cad_versions.commit` + `resolve_removed`），重开装配/回首页时已删除实例不再显示（与 move 同机制，实例级永久删除）。

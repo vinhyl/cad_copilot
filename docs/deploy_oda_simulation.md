@@ -29,8 +29,8 @@ $ python bootstrap.py
 ```
 ✅ 已登记 cad-engine（stdio MCP）到 WorkBuddy 配置
 ⚠️ 还需你做一步：打开 WorkBuddy「连接器管理 / custom connectors」，
-   找到 cad-engine，点 **Trust（信任）** 启用，我才能调用那 17 个 CAD 工具。
-   （build123d_model 默认禁用，无需处理）
+   找到 cad-engine，点 **Trust（信任）** 启用，我才能调用那 18 个 CAD 工具。
+   （其中 build123d_model 默认禁用，无需处理，实际可调 17 个）
 ```
 
 **③ 部署 Agent**：现在检查 ODA 插件——DWG 图纸需要它（DXF 不用）。
@@ -79,7 +79,8 @@ $ venv/bin/python -c "import cad_drawing; print(cad_drawing.probe_oda_converter(
 
 ```
 ✅ cad_copilot 部署完成
-   - Web 服务：python cad_service.py（启动后访问 /app 预览）
+   - Web 服务：bash cad_service_ctl.sh start（后台方式；前台直接跑 python 会被回收）
+   - 打开页面：bash cad_service_ctl.sh open（默认首页，token 用默认的 cad-guest-2026）
    - MCP：cad-engine 已登记，记得点 Trust 启用
    - ODA：已安装，DWG 图纸可直接用
 需要我现在启动服务并给你前端链接吗？

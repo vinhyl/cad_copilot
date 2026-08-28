@@ -1,6 +1,7 @@
 # CAD Copilot (cad_copilot)
 
-> 版本：**v0.1.0** — 变更记录见 [CHANGELOG.md](CHANGELOG.md)
+> 版本：**v0.1.1**（含 v0.1.0 之后的未发布变更；tag 仍停在 v0.1.0，v0.1.1 未重打 tag）——
+> 变更记录见 [CHANGELOG.md](CHANGELOG.md)
 
 本地 AI CAD Copilot 工具链：`cad_service.py`（Web 服务：3D 装配视口 + 特征拾取 +
 编辑会话（草稿模式）+ 版本管理 + 报告中心 + 图纸对照 + FEA/渲染任务），配套
@@ -11,27 +12,48 @@ MCP server 供 agent 以 stdio 调用同一套几何能力（双 transport，共
 ## 🤖 给 Agent / LLM 的操作须知（必读，优先于下面各节）
 
 本服务是**用户与 agent 之间的语义通道**：用户在浏览器点选零件/特征 → agent 精确
-知道要处理哪个对象。凡是"打开 / 预览 / 处理图纸或 STEP"，**必须按下述流程**，
+知道要处理哪个对象。凡是"启动服务 / 打开页面 / 处理图纸或 STEP"，**必须按下述流程**，
 不要走其它方式（否则服务起不来或 token 错配，用户无感知）。
 
 1. **先探活**：`bash cad_service_ctl.sh status`
-   （等价 `curl -H "Authorization: Bearer cad-local-dev-2026" http://127.0.0.1:8764/api/config`
-   返回 `200` 即在线）
+   （等价 `curl -H "Authorization: Bearer cad-guest-2026" http://127.0.0.1:8764/api/config`
+   返回 `200` 即在线；响应体含 `"mode":"guest"|"dev"` 可判定当前入口）
 2. **不在线则启动**：`bash cad_service_ctl.sh start`
    ⚠️ **必须用「后台任务」方式执行**（工具里的 run_in_background）。脚本内部
    `exec python cad_service.py`，该后台任务即服务进程本身；用普通命令前台跑会被
    命令结束杀掉。
 3. **打开页面**：`bash cad_service_ctl.sh open`
-   （自动调系统默认浏览器打开；若打开失败则把下方 URL 给用户）
-4. **固定地址**（token 固定为 `cad-local-dev-2026`，**不要**依赖"启动时随机打印的 token"）：
-   - 图纸对照：`http://127.0.0.1:8764/app/drawing.html?token=cad-local-dev-2026`
-   - 装配预览：`http://127.0.0.1:8764/app/?token=cad-local-dev-2026&load=<encodeURIComponent(绝对路径)>`
-     或 `?cacheKey=<键>`
+   （默认打开「首页」`index.html`；自动调系统默认浏览器打开；若打开失败则把下方 URL 给用户）
+
+### 双 token 入口（默认 guest，dev 需显式切换）
+
+服务同时认两个 token。**默认一律用 guest**，只有明确是开发操作才切到 dev：
+
+- **guest `cad-guest-2026`**（默认）：普通用户操作通道。打开页面 / 自调 API / MCP
+  调用默认用它。
+- **dev `cad-local-dev-2026`**：开发通道。仅当明确是开发诉求（提交 / 改代码 / 构建 /
+  跑测试）时才切到它。
+
+**按 token 判定 mode（权威，不看措辞）**：token 是入口身份的硬标记，**优先于用户措辞**——
+用户嘴里的措辞（哪怕说"提交""改代码"）**不能**把 guest 入口升级成开发入口。
+读法：`curl -H "Authorization: Bearer <当前token>" http://127.0.0.1:8764/api/config`
+的 `"mode"` 字段；`mode=guest` 时按纯使用口径回复，`mode=dev` 才谈开发、执行开发动作。
+
+### 固定地址（默认 token 为 guest `cad-guest-2026`，**不要**依赖"启动时随机打印的 token"）
+
+- **首页（默认落地页）**：`http://127.0.0.1:8764/app/index.html?token=cad-guest-2026`
+  普通「启动服务」即进这里（文件列表 / 装配预览入口）。
+- **启动并打开某个具体文件**：在首页地址后追加 `&load=<encodeURIComponent(绝对路径)>`
+  或 `?cacheKey=<键>`。这是「启动服务并直接打开某份图纸 / 装配」时才用的方式，**不是默认**。
+- **图纸对照（二级视图）**：`http://127.0.0.1:8764/app/drawing.html?token=cad-guest-2026`
+- **编辑会话（二级视图）**：`http://127.0.0.1:8764/app/edit.html?token=cad-guest-2026`
+- **报告中心（二级视图）**：`http://127.0.0.1:8764/app/report.html?token=cad-guest-2026`
 
 **禁止**（这些都会导致服务不可用 / token 错配）：
 - ❌ 直接 `python cad_service.py`（前台阻塞或被回收）→ 统一用 `cad_service_ctl.sh start`
 - ❌ 为"打开图纸"去启动 Vite 开发服务器（`npm run dev` / 5173）→ 生产链接 8764 已自带前端，无需 Node
 - ❌ 假设无 token 或用随机 token 拼 URL
+- ❌ 无开发诉求时把默认链接换成 dev token（guest / dev 是两个入口身份，不是同一通道的两种写法）
 
 **生命周期**：服务随对话会话存活（足够一次交互），长时间不用被回收属正常；用户再次
 要处理时重跑第 1–3 步即可。无需开机自启 / 永久常驻。
@@ -52,7 +74,8 @@ Windows 与 macOS 上命令**完全相同**；仅首次运行需联网。
 
 `bootstrap.py` 只负责环境（venv + 依赖）。**部署阶段还需由 agent 把 `cad-engine`
 接入所用客户端**（见下文「MCP Server 使用」的连接片段）；登记后需在客户端点
-**Trust** 启用，agent 才能调用那 17 个 CAD 工具（`build123d_model` 默认禁用）。
+**Trust** 启用，agent 才能调用那 18 个 CAD 工具（其中 `build123d_model` 默认禁用，
+实际可调 17 个）。
 
 ### 部署阶段：ODA 插件（DWG 支持，默认启用）
 
@@ -89,12 +112,13 @@ https://www.opendesign.com/guestfiles/oda_file_converter 。用户同意后，ag
 >
 > `cad_service_ctl.sh` 已**跨平台**（macOS / Linux / Windows-GitBash 通用）：仓库根由脚本自身位置自动推导（不写死任何绝对路径），venv 解释器、打开浏览器、停止命令均按 OS 自动选择——同一份脚本在任意设备 / 任意路径下都能直接用。
 
-人工启动（固定 token `cad-local-dev-2026`，无需看启动日志）：
+人工启动（默认 guest token `cad-guest-2026`；设 `CAD_SERVICE_GUEST_TOKEN` /
+`CAD_SERVICE_TOKEN` 可覆盖，无需看启动日志）：
 ```bash
 venv/Scripts/python cad_service.py   # Windows
 venv/bin/python        cad_service.py   # macOS / Linux
 ```
-浏览器打开 `http://127.0.0.1:8764/app?token=cad-local-dev-2026`——上传/拖入
+浏览器打开 `http://127.0.0.1:8764/app/index.html?token=cad-guest-2026`——上传/拖入
 STEP 即得 3D 装配视口 + 特征拾取 + 编辑会话（草稿模式）。详见下文「本地 Web
 服务」与「Web 前端」两节。
 
@@ -177,14 +201,14 @@ venv/bin/python        cad_mcp_server.py    # macOS / Linux
 **零新增依赖**），与 MCP server 共享同一套工具库（ADR-0002 D2 双 transport）。
 
 ```bash
-venv/Scripts/python cad_service.py     # http://127.0.0.1:8764，固定 token cad-local-dev-2026
+venv/Scripts/python cad_service.py     # http://127.0.0.1:8764，默认 guest token cad-guest-2026
 ```
 > Agent 请用仓库根的 `cad_service_ctl.sh start`（后台任务方式）拉起，不要手动跑这条命令。
 
 | 端点 | 说明 |
 |---|---|
 | `GET /health` | 健康检查（免鉴权，仅本机） |
-| `GET /api/config` | 启动配置（allowed_dirs，前端路径引导用） |
+| `GET /api/config` | 启动配置（allowed_dirs + 按请求 token 判定的 `mode: guest\|dev`，前端路径引导用） |
 | `POST /api/upload?name=` | **显式授权输入通道**：原始请求体 → 内容寻址落盘 `uploads/<sha256>/`（同内容去重回路径） |
 | `POST /api/assembly/parse` | 装配 STEP → manifest + 写缓存（Bearer token） |
 | `GET /api/assembly/view?cache_key=` | cacheKey 直载已缓存装配体（不读源文件、不重 parse；回首页 / 最近列表 / URL 引导通道） |
@@ -198,7 +222,7 @@ venv/Scripts/python cad_service.py     # http://127.0.0.1:8764，固定 token ca
 | `POST /api/drafts/fea-compare` | FEA 双跑对比：基线 vs 草稿目标模板静力学（R5 job 模式） |
 | `POST /api/reports/generate` | 生成快照报告（体检 + 统计 + 版本历史聚合） |
 | `GET /api/reports[?cache_key=]` / `GET /api/reports/get` | 报告列表 / 单份报告读取 |
-| `GET /api/sessions` | 服务端最近会话列表（前端「最近使用」数据源，跨浏览器同步） |
+| `GET` / `DELETE /api/sessions` | 服务端最近会话列表（前端「最近使用」数据源，跨浏览器同步）/ **隐藏会话**（写 `workspace/.hidden_sessions.json`，「清空记录」用；只隐藏会话，渲染缓存目录保留） |
 | `POST` / `GET /api/selection` | 用户选中上行 / 读取（零件 / 特征 + page + tab，多窗口区分；agent 经 `get_user_selection` 消费） |
 | `POST` / `GET /api/logs/client` | 前端错误上报（error / unhandledrejection + 堆栈）/ 查询 |
 | `POST /api/drawing/import` | 图纸导入：DXF 直读 / DWG 经 ODA 转换 + 语义提取 |
@@ -214,6 +238,8 @@ venv/Scripts/python cad_service.py     # http://127.0.0.1:8764，固定 token ca
 | `GET /versions/{key}/...` | 静态服务版本几何（防目录穿越） |
 | `GET /drawings/{key}/...` | 静态服务图纸 SVG（防目录穿越） |
 | `GET /drafts/{key}/...` | 静态服务草稿预览 glTF（防目录穿越） |
+| `GET /fea/{key}/...` | 静态服务 FEA 结果产物（防目录穿越） |
+| `GET /render/{key}/...` | 静态服务 Blender 渲染图（防目录穿越） |
 | `GET /app/` | Web 前端多页应用（`frontend/dist` 构建产物，见下节） |
 | `WS /ws?token=...` | JSON 协议（ping / parse）+ **事件广播**：`draft_saved` / `draft_deleted` / `version_changed` / `selection_changed` / `report_added`——agent 内置浏览器与系统浏览器双开时状态互通 |
 
@@ -224,8 +250,11 @@ venv/Scripts/python cad_service.py     # http://127.0.0.1:8764，固定 token ca
 几何不重读 STEP）；仅绑 127.0.0.1、token 鉴权、无 CORS（延续约束一）。
 服务日志：`workspace/logs/service.log`（访问日志 + SLOW 标记 + 异常堆栈，
 2 MB × 3 轮转）；前端错误经 `/api/logs/client` 汇入同一日志体系。
-配置：`CAD_SERVICE_TOKEN` / `CAD_SERVICE_ALLOWED_DIRS` / `CAD_SERVICE_WORKSPACE` /
-`CAD_SERVICE_HOST` / `CAD_SERVICE_PORT` / `CAD_SERVICE_FRONTEND_DIR`。
+配置：`CAD_SERVICE_GUEST_TOKEN`（guest 通道，默认 `cad-guest-2026`） /
+`CAD_SERVICE_TOKEN`（dev 通道，默认 `cad-local-dev-2026`） / `CAD_SERVICE_ALLOWED_DIRS` /
+`CAD_SERVICE_WORKSPACE` / `CAD_SERVICE_HOST` / `CAD_SERVICE_PORT` /
+`CAD_SERVICE_FRONTEND_DIR`。
+> 服务同时认这两个 token，并按请求携带的那个返回 `mode`（guest / dev）。
 
 ## Web 前端（多页 MPA）
 
@@ -250,8 +279,9 @@ venv/Scripts/python cad_service.py     # http://127.0.0.1:8764，固定 token ca
 - **最近使用**：**服务端会话列表**（`GET /api/sessions`，跨浏览器同步）——
   点击经 `GET /api/assembly/view` 按 cacheKey 直载（源文件移动 / 删除后仍可
   打开，缓存命中秒开）
-- **agent 预览入口**：`/app?token=...&load=<encodeURIComponent(路径)>` 或
-  `?cacheKey=<键>`——agent（内置浏览器 navigate 或生成链接）驱动加载；`?token=`
+- **agent 预览入口**：`/app/index.html?token=...&load=<encodeURIComponent(路径)>` 或
+  `?cacheKey=<键>`——**仅在「启动服务并直接打开某个具体文件」时用**，普通启动服务
+  默认进首页即可；agent（内置浏览器 navigate 或生成链接）驱动加载；`?token=`
   / `?load=` / `?cacheKey=` **保留在地址栏**（agent 内置浏览器"用系统浏览器打开"
   后免重新输入 token），路径仍受服务端 `safe_input_path` 权威校验
 - 白名单外的路径（绕过前置校验时）：403 + 可操作文案（移入目录 / 设
@@ -328,7 +358,7 @@ M10x1.5 / 直径 Ø8 / 公差 H7/g6，模块六语义真理）+ **零件名语�
 点击定位；+ 轻依赖 SVG 渲染（LINE/CIRCLE/ARC/LWPOLYLINE/TEXT，零 PIL 依赖）。
 
 - **使用（零 Node 依赖）**：服务起来后浏览器打开
-  `http://127.0.0.1:8764/app/drawing.html?token=cad-local-dev-2026`（图纸对照页）。
+  `http://127.0.0.1:8764/app/drawing.html?token=cad-guest-2026`（图纸对照页）。
   Agent 用 `bash cad_service_ctl.sh open` 或 `status` / `start` 管理。构建产物
   `frontend/dist/` **随仓库提交**——分发时带走仓库即可离线运行。
 - **开发（需 Node 18+）**：`cd frontend && npm install`，之后 `npm run dev`
@@ -339,13 +369,24 @@ M10x1.5 / 直径 Ø8 / 公差 H7/g6，模块六语义真理）+ **零件名语�
 - token 经 localStorage 保存；`/cache/` 静态文件不设 token（GLTFLoader 无法附带
   请求头）——仅本机监听 + 无 CORS 下可接受（ADR-0002 延续约束一的本地化取舍）。
 
-### 验证连接（mcp_test.py）
-开发期可用 `mcp_test.py` 端到端验证 server（它会拉起 server 并真跑几个工具）：
-```bash
-venv/Scripts/python mcp_test.py    # Windows
+### 验证 MCP server 已就绪
+确认客户端能拉起 server 并列出全部工具（`build123d_model` 未开启 `CAD_MCP_ALLOW_BUILD123D`
+时不出现在列表里，属预期）：
+
+```python
+import asyncio
+from fastmcp import Client
+
+async def main():
+    async with Client("cad_mcp_server.py") as c:
+        tools = await c.list_tools()
+        print(len(tools), [t.name for t in tools])
+
+asyncio.run(main())
 ```
-> 注意：`mcp_test.py` 是开发用冒烟脚本，已被 `.gitignore` 忽略，且当前**硬编码了本机绝对路径**
->（已知局限，见 CHANGELOG / 审计 L6），并非可移植的生产测试。正式的回归测试请用 pytest（见「开发与测试」）。
+> 历史上有过一个开发期冒烟脚本 `mcp_test.py`，它已被 `.gitignore` 排除、不在仓库中
+>（且曾硬编码本机绝对路径，不可移植）。**不要照旧文档去找它**——回归测试请用 pytest
+>（见「开发与测试」），端到端冒烟见下一节。
 
 ## 命令行速查
 
@@ -389,14 +430,20 @@ workspace/
 - `cad_fea.py` / `cad_render.py` — FEA（FreeCAD+CalculiX）与渲染（Blender）子进程插件（探测降级 + 缓存 + 进度中继）
 - `evals/` — 评测基准集（D9）：指令三层标注 + `run_evals.py`（黄金轨迹回放 + 几何断言全自动化；LLM 对比层后续接入）
 - `cad_build.py` — build123d 字体 import-hook（跨平台无害，修复损坏系统字体导致 import 崩溃）
+- `cad_service_ctl.sh` — 服务生命周期控制脚本（跨平台，自定位仓库根）：`status` / `start` / `open` / `stop`，默认 guest token
+- `build_viewer_cache.py` — 离线预构建查看器缓存（glTF + 装配 manifest），供首次打开大装配时秒开
+- `start_cad_service.command` — macOS 可选：双击注册 launchd 常驻服务（默认会话级启动即可，非必需）
 - `frontend/` — Web 前端多页 MPA（Vite + three.js：首页 / 编辑 / 图纸 / 报告四入口，`pages/` + `shared/` 分层）；`dist/` 构建产物随仓库提交（离线运行无需 Node）
-- `tests/` — pytest 测试套件（Phase 3 建立；Phase A/B/C/D 增装配/服务层/编辑流/图纸用例，当前 **192 个用例全绿**）
+- `scripts/check-dist-sync.sh` — dist 与 src 一致性校验（npm ci + build + 比对 HEAD）；CI 用 `--strict`
+- `.githooks/pre-commit` — 本机 hook（`git config core.hooksPath .githooks` 启用）：frontend 源码变动时自动重建 dist
+- `tests/` — pytest 测试套件（Phase 3 建立；Phase A/B/C/D 增装配/服务层/编辑流/图纸用例，当前 **214 个用例全绿**，2026-08-28 核对）
 - `pytest.ini` — pytest 配置（含 `--cov` 覆盖率）
 - `docs/architecture/copilot-vision.md` — Web Copilot 系统设想（原根目录 `设想.txt` 迁入；文首附与 ADR-0002 的差异摘要）
 - `docs/decisions/0001-ocp-vs-freecad-base.md` — ADR-0001：OCP 轻量底座 vs FreeCAD 方案对比（原 `comparison.md`）
 - `docs/decisions/0002-web-copilot-expansion.md` — ADR-0002：Web Copilot 扩展决策（D1–D10 + 延续约束 + 风险登记 R1–R17）
 - `CHANGELOG.md` — 版本变更记录（基线 v0.1.0）
-- `selftest*.step` / `selftest.iges` — 示例输入（`selftest.py` 可再生），用于冒烟测试
+- `selftest*.step` / `selftest.iges` — 示例输入，供 pytest 套件与 CI 冒烟直接引用
+  （历史上的 `selftest.py` 生成器已退役，不在仓库中）
 
 ## 同步更新
 本仓库即单一可信源。任意机器上：
@@ -412,9 +459,14 @@ python bootstrap.py      # 仅当依赖变更时需要重跑；代码更新直�
 
 ### 冒烟测试
 ```bash
-python selftest.py       # OCP 工具链端到端（建模 → 读写 → 属性 → 转换）
+venv/Scripts/python -c "import cad_mcp_server as m, json; d=json.loads(m.pick_features('selftest.step')); assert d['feature_count']>0 and all('id' in f for f in d['features']); print('pick_features OK ->', d['feature_count'], 'features')"
 ```
-CI 还会调用 `pick_features` MCP 工具并对 `feature_count > 0` 与特征 id 完整性做断言。
+与 CI 的 smoke 步骤同一条断言：拉起 `pick_features` 并对 `feature_count > 0` 与特征 id
+完整性做断言，覆盖「OCP 读得进 STEP、特征枚举可用」这条主干。
+
+> 旧的 `python selftest.py`（建模 → 读写 → 属性 → 转换）**已退役**：该脚本被
+> `.gitignore` 排除、不在仓库中，其 OCP 端到端覆盖已并入 pytest 套件的
+> `tests/test_selftest_e2e.py`，后者是权威回归门。
 
 ### pytest 回归套件
 ```bash
